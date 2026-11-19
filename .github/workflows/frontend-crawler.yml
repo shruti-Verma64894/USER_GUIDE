@@ -20,8 +20,10 @@ jobs:
    steps:
      - name: Checkout Crawler Repo
        uses: actions/checkout@v4
-     - name: Install jq & git
-       run: apt-get update && apt-get install -y jq git
+     - name: Install jq (Fast)
+       run: |
+         curl -sL https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64 -o /usr/local/bin/jq
+         chmod +x /usr/local/bin/jq
      - name: Install Dependencies
        run: npm ci
      - name: Patch config.json for Current Portal

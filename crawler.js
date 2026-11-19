@@ -601,6 +601,43 @@ async function loginIfEnabled(page, site) {
 // 7. CRAWL ONE WEBSITE
 // ======================================
 
+function isLogoutLink(link) {
+    const text = [
+        link.text,
+        link.label,
+        link.href,
+        link.url,
+        link.title,
+        link.ariaLabel
+    ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+    return (
+        /\b(logout|log out|signout|sign out|logoff|log off|signoff|sign off)\b/i.test(text) ||
+        /\/(logout|log-out|signout|sign-out|logoff|log-off|signoff|sign-off)(\/|$|\?)/i.test(text)
+    );
+}
+
+function isCoveredByTablePage(url, tablePageUrls) {
+    const candidate = new URL(url);
+
+    for (const tablePageUrl of tablePageUrls) {
+        const tablePage = new URL(tablePageUrl);
+
+        if (
+            candidate.origin === tablePage.origin &&
+            tablePage.pathname !== "/" &&
+            candidate.pathname.startsWith(`${tablePage.pathname}/`)
+        ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 async function crawlWebsite(siteConfig) {
 
     // Resolve this website's URL and credentials.
@@ -627,6 +664,10 @@ async function crawlWebsite(siteConfig) {
     const visitedUrls = new Set();
 
     const urlQueue = [site.startUrl];
+    const queuedUrls = new Set([
+        normalizeUrl(site.startUrl, site)
+    ]);
+    const tablePageUrls = new Set();
 
     const websiteData = {
         websiteName: site.name,
@@ -678,6 +719,11 @@ async function crawlWebsite(siteConfig) {
 
         while (urlQueue.length > 0) {
 
+            urlQueue.sort((left, right) =>
+                new URL(left).pathname.split("/").filter(Boolean).length -
+                new URL(right).pathname.split("/").filter(Boolean).length
+            );
+
             // Stop when the configured page limit is reached.
             if (
                 MAX_PAGES > 0 &&
@@ -695,6 +741,7 @@ async function crawlWebsite(siteConfig) {
                 currentUrl,
                 site
             );
+            queuedUrls.delete(normalizedUrl);
 
             // Skip invalid or already visited URLs.
             if (
@@ -756,6 +803,11 @@ async function crawlWebsite(siteConfig) {
                     continue;
                 }
 
+                const landedUrl = normalizeUrl(page.url(), site);
+                if (landedUrl) {
+                    visitedUrls.add(landedUrl);
+                }
+
                 // ======================================
                 // EXTRACT PAGE INFORMATION
                 // ======================================
@@ -765,6 +817,83 @@ async function crawlWebsite(siteConfig) {
                 pageData.httpStatus = response.status();
 
                 pageData.crawledAt = new Date().toISOString();
+
+                const tableRows = await page.locator("table").evaluateAll(
+                    tables => tables
+                        .filter(table =>
+                            !table.closest("footer, [role='contentinfo']")
+                        )
+                        .map((table, tableIndex) => ({
+                            tableIndex,
+                            allLinkHrefs: Array.from(
+                                table.querySelectorAll("a[href]")
+                            ).map(anchor => anchor.href),
+                            rows: Array.from(
+                                table.querySelectorAll("tbody tr")
+                            )
+                                .map((row, rowIndex) => ({
+                                    rowIndex,
+                                    cells: Array.from(
+                                        row.querySelectorAll("th, td")
+                                    ).map(cell => cell.innerText.trim()),
+                                    uniqueValue:
+                                        row.getAttribute("data-id") ||
+                                        row.innerText.trim().replace(/\s+/g, " ") ||
+                                        `row-${rowIndex + 1}`,
+                                    links: Array.from(
+                                        row.querySelectorAll("a[href]")
+                                    ).map(anchor => ({
+                                        text: anchor.innerText.trim(),
+                                        href: anchor.href,
+                                        title: anchor.title,
+                                        ariaLabel: anchor.getAttribute("aria-label")
+                                    }))
+                                }))
+                                .filter(row =>
+                                    row.cells.some(Boolean) ||
+                                    row.links.length > 0
+                                )
+                        }))
+                );
+
+                const selectedTableRows = [];
+
+                for (const table of tableRows) {
+                    if (table.rows.length === 0) {
+                        continue;
+                    }
+
+                    const selectedRow =
+                        table.rows[
+                            Math.floor(Math.random() * table.rows.length)
+                        ];
+
+                    if (pageData.tables[table.tableIndex]) {
+                        pageData.tables[table.tableIndex].rows = [
+                            selectedRow.cells
+                        ];
+                    }
+
+                    selectedTableRows.push({
+                        tableIndex: table.tableIndex,
+                        rowIndex: selectedRow.rowIndex,
+                        uniqueValue: selectedRow.uniqueValue,
+                        links: selectedRow.links
+                    });
+                }
+
+                const tableLinkHrefs = new Set(
+                    tableRows.flatMap(table => table.allLinkHrefs)
+                );
+                const selectedTableLinkHrefs = new Set(
+                    selectedTableRows.flatMap(row =>
+                        row.links.map(link => link.href)
+                    )
+                );
+                pageData.links = pageData.links.filter(link =>
+                    !tableLinkHrefs.has(link.href) ||
+                    selectedTableLinkHrefs.has(link.href)
+                );
 
                 // Generate page folder name.
                 const pageNumber = websiteData.pages.length + 1;
@@ -889,104 +1018,80 @@ async function crawlWebsite(siteConfig) {
                 // DISCOVER INTERNAL LINKS
                 // ======================================
 
-                const tableEntryUrls = new Set(
-                    (
-                        await page.locator("table a[href]").evaluateAll(
-                            anchors => anchors.map(anchor => anchor.href)
-                        )
-                    )
-                        .map(url => normalizeUrl(url, site))
-                        .filter(Boolean)
+                const selectedRowUrls = new Set();
+
+                for (const selectedRow of selectedTableRows) {
+                    console.log(
+                        `Selected random row ${selectedRow.rowIndex + 1} ` +
+                        `from table ${selectedRow.tableIndex + 1}:`,
+                        selectedRow.uniqueValue
+                    );
+
+                    for (const link of selectedRow.links) {
+                        if (isLogoutLink(link)) {
+                            continue;
+                        }
+
+                        const discoveredUrl = normalizeUrl(link.href, site);
+                        if (discoveredUrl) {
+                            selectedRowUrls.add(discoveredUrl);
+                        }
+                    }
+                }
+
+                const nonTableLinks = await page.locator("a[href]").evaluateAll(
+                    anchors => anchors
+                        .filter(anchor => !anchor.closest("table"))
+                        .map(anchor => ({
+                            text: anchor.innerText.trim(),
+                            href: anchor.href,
+                            title: anchor.title,
+                            ariaLabel: anchor.getAttribute("aria-label")
+                        }))
                 );
 
-                const dataEntryGroups = new Map();
+                // A table endpoint covers its deeper record URLs.
+                const hasTableRows = selectedTableRows.length > 0;
+                if (hasTableRows && landedUrl) {
+                    tablePageUrls.add(landedUrl);
 
-                for (const link of pageData.links) {
-
-                    const discoveredUrl = normalizeUrl(
-                        link.href,
-                        site
-                    );
-
-                    if (!discoveredUrl) {
-                        continue;
-                    }
-
-                    const segments = new URL(discoveredUrl)
-                        .pathname
-                        .split("/")
-                        .filter(Boolean);
-
-                    if (
-                        segments.length >= 3 &&
-                        segments[0].toLowerCase() === "data"
-                    ) {
-
-                        const groupKey =
-                            `/data/${segments[1].toLowerCase()}`;
-
-                        if (!dataEntryGroups.has(groupKey)) {
-                            dataEntryGroups.set(
-                                groupKey,
-                                new Set()
-                            );
+                    for (const queuedUrl of Array.from(queuedUrls)) {
+                        if (isCoveredByTablePage(queuedUrl, tablePageUrls)) {
+                            queuedUrls.delete(queuedUrl);
                         }
-
-                        dataEntryGroups
-                            .get(groupKey)
-                            .add(discoveredUrl);
                     }
-                }
 
-                const entryLinkUrls = new Set(tableEntryUrls);
-
-                for (const urls of dataEntryGroups.values()) {
-
-                    if (urls.size > 1) {
-                        for (const url of urls) {
-                            entryLinkUrls.add(url);
+                    for (let index = urlQueue.length - 1; index >= 0; index--) {
+                        if (isCoveredByTablePage(urlQueue[index], tablePageUrls)) {
+                            urlQueue.splice(index, 1);
                         }
                     }
                 }
 
-                let queuedEntryLinks = 0;
+                const discoveredUrls = new Set(selectedRowUrls);
 
-                for (const link of pageData.links) {
-
-                    const discoveredUrl = normalizeUrl(
-                        link.href,
-                        site
-                    );
-
-                    if (!discoveredUrl) {
+                for (const link of nonTableLinks) {
+                    if (isLogoutLink(link)) {
                         continue;
                     }
 
-                    const isEntryLink =
-                        entryLinkUrls.has(discoveredUrl);
-
-                    if (
-                        isEntryLink &&
-                        queuedEntryLinks >=
-                            crawlerConfig.maxEntryLinksPerPage
-                    ) {
-                        continue;
+                    const discoveredUrl = normalizeUrl(link.href, site);
+                    if (discoveredUrl) {
+                        discoveredUrls.add(discoveredUrl);
                     }
+                }
 
+                for (const discoveredUrl of discoveredUrls) {
                     if (
                         !visitedUrls.has(discoveredUrl) &&
-                        !urlQueue.includes(discoveredUrl)
+                        !queuedUrls.has(discoveredUrl) &&
+                        !isCoveredByTablePage(discoveredUrl, tablePageUrls)
                     ) {
-
                         urlQueue.push(discoveredUrl);
-
-                        if (isEntryLink) {
-                            queuedEntryLinks += 1;
-                        }
+                        queuedUrls.add(discoveredUrl);
                     }
                 }
 
-                // Delay between pages.
                 await page.waitForTimeout(
                     crawlerConfig.delayBetweenPages
                 );
@@ -1114,11 +1219,23 @@ async function runAllWebsites() {
 // 11. EXECUTE CRAWLER
 // ======================================
 
-runAllWebsites()
-    .then(() => {
-        console.log("All crawler processes finished.");
-    })
-    .catch(error => {
-        console.error("Crawler failed:", error);
-        process.exitCode = 1;
-    });
+const selectedWebsite = process.argv[2];
+
+if (selectedWebsite) {
+  const website = config.websites.find(
+    site => site.id.toLowerCase() === selectedWebsite.toLowerCase()
+  );
+
+  if (!website) {
+    console.log(`Website "${selectedWebsite}" not found.`);
+    console.log(
+      "Available websites:",
+      config.websites.map(site => site.id).join(", ")
+    );
+    process.exit(1);
+  }
+
+  crawlWebsite(resolveWebsiteConfig(website));
+} else {
+  runAllWebsites();
+}

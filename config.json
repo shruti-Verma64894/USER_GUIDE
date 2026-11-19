@@ -15,12 +15,11 @@
       "startUrlEnv": "ADMIN_URL",
       "usernameEnv": "ADMIN_USERNAME",
       "passwordEnv": "ADMIN_PASSWORD",
-      "auth": {
-        "enabled": true,
-        "usernameSelector": "#username",
-        "passwordSelector": "#password",
-        "submitSelector": "#kc-login"
-      }
+     "auth": {
+      "enabled": true,
+      "usernameSelector": "#exampleInputEmail1",
+      "passwordSelector": "#exampleInputPassword1",
+      "submitSelector": "button[type='submit'].submit_btn"    }
     },
     {
       "id": "client",
@@ -49,7 +48,7 @@
     "sameDomainOnly": true,
     "removeQueryParameters": true,
     "maxEntryLinksPerPage": 1,
-    "maxPages": 0
+    "maxPages": 5
   },
   "output": {
     "folder": "output",

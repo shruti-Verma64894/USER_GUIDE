@@ -620,22 +620,24 @@ function isLogoutLink(link) {
     );
 }
 
-function isCoveredByTablePage(url, tablePageUrls) {
+function getEntryCollectionKey(url) {
     const candidate = new URL(url);
+    const segments = candidate.pathname.split("/").filter(Boolean);
 
-    for (const tablePageUrl of tablePageUrls) {
-        const tablePage = new URL(tablePageUrl);
-
-        if (
-            candidate.origin === tablePage.origin &&
-            tablePage.pathname !== "/" &&
-            candidate.pathname.startsWith(`${tablePage.pathname}/`)
-        ) {
-            return true;
+    if (segments[0]?.toLowerCase() === "data") {
+        if (segments.length < 3) {
+            return null;
         }
+
+        return `${candidate.origin}/data/${segments[1].toLowerCase()}`;
     }
 
-    return false;
+    if (segments.length < 2) {
+        return null;
+    }
+
+    candidate.pathname = `/${segments.slice(0, -1).join("/")}`;
+    return `${candidate.origin}${candidate.pathname}`;
 }
 
 async function crawlWebsite(siteConfig) {
@@ -667,7 +669,7 @@ async function crawlWebsite(siteConfig) {
     const queuedUrls = new Set([
         normalizeUrl(site.startUrl, site)
     ]);
-    const tablePageUrls = new Set();
+    const selectedEntryCollections = new Set();
 
     const websiteData = {
         websiteName: site.name,
@@ -752,6 +754,11 @@ async function crawlWebsite(siteConfig) {
             }
 
             visitedUrls.add(normalizedUrl);
+            const visitedEntryCollection =
+                getEntryCollectionKey(normalizedUrl);
+            if (visitedEntryCollection) {
+                selectedEntryCollections.add(visitedEntryCollection);
+            }
 
             console.log("\nCrawling:", normalizedUrl);
 
@@ -770,6 +777,11 @@ async function crawlWebsite(siteConfig) {
 
                 // Check HTTP response.
                 if (!response || response.status() >= 400) {
+
+                    console.error(
+                        `Skipping ${normalizedUrl}: HTTP ` +
+                        `${response ? response.status() : "no response"}`
+                    );
 
                     websiteData.failedPages.push({
                         url: normalizedUrl,
@@ -1019,6 +1031,22 @@ async function crawlWebsite(siteConfig) {
                 // ======================================
 
                 const selectedRowUrls = new Set();
+                const rowEntryGroups = new Map();
+                const addDiscoveredUrl = discoveredUrl => {
+                    const collectionKey =
+                        getEntryCollectionKey(discoveredUrl);
+
+                    if (!collectionKey) {
+                        selectedRowUrls.add(discoveredUrl);
+                        return;
+                    }
+
+                    if (!rowEntryGroups.has(collectionKey)) {
+                        rowEntryGroups.set(collectionKey, new Set());
+                    }
+
+                    rowEntryGroups.get(collectionKey).add(discoveredUrl);
+                };
 
                 for (const selectedRow of selectedTableRows) {
                     console.log(
@@ -1034,7 +1062,7 @@ async function crawlWebsite(siteConfig) {
 
                         const discoveredUrl = normalizeUrl(link.href, site);
                         if (discoveredUrl) {
-                            selectedRowUrls.add(discoveredUrl);
+                            addDiscoveredUrl(discoveredUrl);
                         }
                     }
                 }
@@ -1050,26 +1078,6 @@ async function crawlWebsite(siteConfig) {
                         }))
                 );
 
-                // A table endpoint covers its deeper record URLs.
-                const hasTableRows = selectedTableRows.length > 0;
-                if (hasTableRows && landedUrl) {
-                    tablePageUrls.add(landedUrl);
-
-                    for (const queuedUrl of Array.from(queuedUrls)) {
-                        if (isCoveredByTablePage(queuedUrl, tablePageUrls)) {
-                            queuedUrls.delete(queuedUrl);
-                        }
-                    }
-
-                    for (let index = urlQueue.length - 1; index >= 0; index--) {
-                        if (isCoveredByTablePage(urlQueue[index], tablePageUrls)) {
-                            urlQueue.splice(index, 1);
-                        }
-                    }
-                }
-
-                const discoveredUrls = new Set(selectedRowUrls);
-
                 for (const link of nonTableLinks) {
                     if (isLogoutLink(link)) {
                         continue;
@@ -1077,15 +1085,33 @@ async function crawlWebsite(siteConfig) {
 
                     const discoveredUrl = normalizeUrl(link.href, site);
                     if (discoveredUrl) {
-                        discoveredUrls.add(discoveredUrl);
+                        selectedRowUrls.add(discoveredUrl);
                     }
                 }
+
+                for (const [collectionKey, urls] of rowEntryGroups) {
+                    if (selectedEntryCollections.has(collectionKey)) {
+                        continue;
+                    }
+
+                    const candidates = Array.from(urls);
+                    const selectedEntry =
+                        candidates[Math.floor(Math.random() * candidates.length)];
+
+                    selectedEntryCollections.add(collectionKey);
+                    selectedRowUrls.add(selectedEntry);
+                    console.log(
+                        `Selected one entry for ${collectionKey}:`,
+                        selectedEntry
+                    );
+                }
+
+                const discoveredUrls = new Set(selectedRowUrls);
 
                 for (const discoveredUrl of discoveredUrls) {
                     if (
                         !visitedUrls.has(discoveredUrl) &&
-                        !queuedUrls.has(discoveredUrl) &&
-                        !isCoveredByTablePage(discoveredUrl, tablePageUrls)
+                        !queuedUrls.has(discoveredUrl)
                     ) {
                         urlQueue.push(discoveredUrl);
                         queuedUrls.add(discoveredUrl);
@@ -1098,9 +1124,10 @@ async function crawlWebsite(siteConfig) {
 
             } catch (error) {
 
-                console.log(
+                console.error(
                     "Error crawling:",
-                    normalizedUrl
+                    normalizedUrl,
+                    error.message
                 );
 
                 websiteData.failedPages.push({

@@ -48,7 +48,7 @@
     "sameDomainOnly": true,
     "removeQueryParameters": true,
     "maxEntryLinksPerPage": 1,
-    "maxPages": 5
+    "maxPages": 2
   },
   "output": {
     "folder": "output",

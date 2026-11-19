@@ -34,6 +34,14 @@ jobs:
             '.website.name = $name | .website.startUrl = $url | .auth.enabled = $auth | .output.saveScreenshots = false' \
             config.json > config.tmp.json && mv config.tmp.json config.json
      - name: Run Playwright Crawler
+       env:
+         PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+         ADMIN_URL: ${{ vars.ADMIN_URL }}
+         CLIENT_URL: ${{ vars.CLIENT_URL }}
+         ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+         ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+         CLIENT_EMAIL: ${{ secrets.CLIENT_EMAIL }}
+         CLIENT_PASSWORD: ${{ secrets.CLIENT_PASSWORD }}
        run: node crawler.js
      - name: Normalize JSON & Push to Central Docs Repo
        id: push_data

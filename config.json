@@ -1,30 +1,55 @@
 
 {
-  "website": {
-    "name": "GovCon360",
-    "startUrl": "https://www.nlproducts.net/"
-  },
-  "auth": {
-    "enabled": false,
-    "loginUrl": "",
-    "usernameSelector": "#username",
-    "passwordSelector": "#password",
-    "submitSelector": "#kc-login",
-    "successUrl": ""
-  },
+  "websites": [
+    {
+      "id": "public",
+      "name": "GovCon360 Public",
+      "startUrlEnv": "PUBLIC_URL",
+      "auth": {
+        "enabled": false
+      }
+    },
+    {
+      "id": "admin",
+      "name": "GovCon360 Admin",
+      "startUrlEnv": "ADMIN_URL",
+      "usernameEnv": "ADMIN_USERNAME",
+      "passwordEnv": "ADMIN_PASSWORD",
+      "auth": {
+        "enabled": true,
+        "usernameSelector": "#username",
+        "passwordSelector": "#password",
+        "submitSelector": "#kc-login"
+      }
+    },
+    {
+      "id": "client",
+      "name": "GovCon360 Client",
+      "startUrlEnv": "CLIENT_URL",
+      "usernameEnv": "CLIENT_USERNAME",
+      "passwordEnv": "CLIENT_PASSWORD",
+      "auth": {
+        "enabled": true,
+        "usernameSelector": "#username",
+        "passwordSelector": "#password",
+        "submitSelector": "#kc-login"
+      }
+    }
+  ],
   "browser": {
     "headless": false,
     "width": 1440,
     "height": 900
   },
-    "crawler": {
+  "crawler": {
     "waitTime": 1500,
     "delayBetweenPages": 500,
-    "timeout": 60000,
+    "timeout": 90000,
     "waitUntil": "networkidle",
     "sameDomainOnly": true,
     "removeQueryParameters": true,
-    "maxEntryLinksPerPage": 1
+    "maxEntryLinksPerPage": 1,
+    "maxPages": 0
   },
   "output": {
     "folder": "output",

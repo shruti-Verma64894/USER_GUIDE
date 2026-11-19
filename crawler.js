@@ -1,444 +1,373 @@
+
 const { chromium } = require("playwright");
-
 const fs = require("fs");
-
 const path = require("path");
+require("dotenv").config({ path: path.resolve(__dirname, ".env") });
 
 // ======================================
-
 // 1. READ CONFIGURATION
-
 // ======================================
 
 const config = require("./config.json");
 
-const START_URL = config.website.startUrl;
-const MAX_ENTRY_LINKS_PER_PAGE = config.crawler.maxEntryLinksPerPage;
-const auth = config.auth || { enabled: false };
+if (!Array.isArray(config.websites) || config.websites.length === 0) {
+    throw new Error("config.json must contain a non-empty websites array.");
+}
 
-const OUTPUT_FOLDER = path.resolve(
+const crawlerConfig = config.crawler;
+const browserConfig = config.browser;
+const outputConfig = config.output;
+
+const OUTPUT_ROOT = path.resolve(
     __dirname,
-    process.env.CRAWL_OUTPUT || config.output.folder
+    outputConfig.folder || "output"
 );
 
-const PAGES_FOLDER = path.join(
+const VALID_WAIT_UNTIL = [
+    "domcontentloaded",
+    "load",
+    "networkidle",
+    "commit"
+];
 
-    OUTPUT_FOLDER,
-
-    "pages"
-
-);
-
-// Validate configuration
-
-if (!START_URL) {
-
-    throw new Error("Invalid website URL in config.json");
-
+if (!VALID_WAIT_UNTIL.includes(crawlerConfig.waitUntil)) {
+    throw new Error("Invalid crawler.waitUntil value in config.json");
 }
 
 if (
-    !Number.isInteger(MAX_ENTRY_LINKS_PER_PAGE) ||
-    MAX_ENTRY_LINKS_PER_PAGE < 0
+    !Number.isInteger(crawlerConfig.maxEntryLinksPerPage) ||
+    crawlerConfig.maxEntryLinksPerPage < 0
 ) {
-
-    throw new Error("crawler.maxEntryLinksPerPage must be a non-negative integer in config.json");
-
+    throw new Error(
+        "crawler.maxEntryLinksPerPage must be a non-negative integer."
+    );
 }
 
-const parsedStartUrl = new URL(START_URL);
+// Optional page limit. 0 means unlimited.
+const MAX_PAGES = crawlerConfig.maxPages || 0;
 
-if (!["http:", "https:"].includes(parsedStartUrl.protocol)) {
-
-    throw new Error("startUrl must use HTTP or HTTPS");
-
+if (!Number.isInteger(MAX_PAGES) || MAX_PAGES < 0) {
+    throw new Error("crawler.maxPages must be a non-negative integer.");
 }
 
-if (!["domcontentloaded", "load", "networkidle", "commit"].includes(config.crawler.waitUntil)) {
+// ======================================
+// 2. RESOLVE WEBSITE CONFIGURATION
+// ======================================
 
-    throw new Error("Invalid waitUntil value in config.json");
+function resolveWebsiteConfig(site) {
+    const startUrl = process.env[site.startUrlEnv];
 
-}
-
-if (typeof auth.enabled !== "boolean") {
-
-    throw new Error("auth.enabled must be true or false in config.json");
-
-}
-
-if (auth.enabled) {
-
-    const requiredAuthSettings = [
-        auth.loginUrl,
-        auth.usernameSelector,
-        auth.passwordSelector,
-        auth.submitSelector
-    ];
-
-    if (requiredAuthSettings.some(value =>
-        typeof value !== "string" || !value.trim()
-    )) {
-
-        throw new Error("All auth login settings must be configured when auth.enabled is true");
-
+    if (!startUrl) {
+        throw new Error(
+            `Missing environment variable: ${site.startUrlEnv}`
+        );
     }
 
-    if (
-        !(typeof auth.successUrl === "string" && auth.successUrl.trim()) &&
-        !(typeof auth.successSelector === "string" && auth.successSelector.trim())
-    ) {
+    let parsedStartUrl;
 
-        throw new Error("Configure auth.successUrl or auth.successSelector when auth.enabled is true");
-
+    try {
+        parsedStartUrl = new URL(startUrl);
+    } catch {
+        throw new Error(`Invalid URL for website: ${site.name}`);
     }
 
-    const parsedLoginUrl = new URL(auth.loginUrl);
-
-    if (!["http:", "https:"].includes(parsedLoginUrl.protocol)) {
-
-        throw new Error("auth.loginUrl must use HTTP or HTTPS");
-
+    if (!["http:", "https:"].includes(parsedStartUrl.protocol)) {
+        throw new Error(
+            `${site.name} URL must use HTTP or HTTPS.`
+        );
     }
 
-    if (auth.successUrl) {
+    const auth = site.auth || { enabled: false };
 
-        const successUrl = auth.successUrl.replace(/\/\*\*$/, "/");
-        const parsedSuccessUrl = new URL(successUrl);
+    if (typeof auth.enabled !== "boolean") {
+        throw new Error(
+            `${site.name}: auth.enabled must be true or false.`
+        );
+    }
 
-        if (!["http:", "https:"].includes(parsedSuccessUrl.protocol)) {
+    let resolvedAuth = { ...auth };
 
-            throw new Error("auth.successUrl must use HTTP or HTTPS");
+    if (auth.enabled) {
+        const username = process.env[site.usernameEnv];
+        const password = process.env[site.passwordEnv];
 
+        if (!username || !password) {
+            throw new Error(
+                `${site.name}: Missing username or password. ` +
+                `Check ${site.usernameEnv} and ${site.passwordEnv} in .env.`
+            );
         }
 
+        const requiredSelectors = [
+            auth.usernameSelector,
+            auth.passwordSelector,
+            auth.submitSelector
+        ];
+
+        if (
+            requiredSelectors.some(
+                selector =>
+                    typeof selector !== "string" || !selector.trim()
+            )
+        ) {
+            throw new Error(
+                `${site.name}: Configure usernameSelector, ` +
+                "passwordSelector and submitSelector."
+            );
+        }
+
+        if (
+            auth.successUrl &&
+            !auth.successUrl.trim()
+        ) {
+            throw new Error(
+                `${site.name}: successUrl cannot be an empty string.`
+            );
+        }
+
+        if (
+            !auth.successUrl &&
+            !auth.successSelector
+        ) {
+            console.log(
+                `${site.name}: Login success will be checked by ` +
+                "verifying that the login fields disappear."
+            );
+        }
+
+        resolvedAuth = {
+            ...auth,
+            username,
+            password
+        };
     }
 
-    if (!process.env.CRAWLER_USERNAME || !process.env.CRAWLER_PASSWORD) {
-
-        throw new Error("Set CRAWLER_USERNAME and CRAWLER_PASSWORD environment variables when auth.enabled is true");
-
-    }
-
+    return {
+        ...site,
+        startUrl,
+        parsedStartUrl,
+        auth: resolvedAuth
+    };
 }
 
 // ======================================
-
-// 2. CRAWLER STORAGE
-
-// ======================================
-
-const visitedUrls = new Set();
-
-const urlQueue = [START_URL];
-
-const websiteData = {
-
-    websiteName: config.website.name,
-
-    website: START_URL,
-
-    crawledAt: new Date().toISOString(),
-
-    totalPages: 0,
-
-    failedPages: [],
-
-    pages: []
-
-};
-
-// ======================================
-
 // 3. GENERATE READABLE FOLDER NAMES
-
 // ======================================
 
 function slugify(text) {
-
-    return text
-
-        .toLowerCase()
-
-        .replace(/[^a-z0-9]+/g, "-")
-
-        .replace(/^-+|-+$/g, "")
-
-        .substring(0, 80);
-
+    return String(text || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .substring(0, 80);
 }
 
 function generateFolderName(pageData, pageNumber) {
+    const url = new URL(pageData.pageUrl);
 
-    const url = new URL(pageData.pageUrl);
+    let pageName = slugify(url.pathname);
 
-    let pageName = slugify(url.pathname);
+    if (!pageName) {
+        pageName = slugify(pageData.pageTitle) || "home";
+    }
 
-    if (!pageName) {
+    const number = String(pageNumber).padStart(2, "0");
 
-        pageName = slugify(pageData.pageTitle) || "home";
-
-    }
-
-    const number = String(pageNumber).padStart(2, "0");
-
-    return `${number}-${pageName}`;
-
+    return `${number}-${pageName}`;
 }
 
 // ======================================
-
 // 4. NORMALIZE WEBSITE URLS
-
 // ======================================
 
-function normalizeUrl(url) {
+function normalizeUrl(url, site) {
+    try {
+        const parsedUrl = new URL(url);
 
-    try {
+        // Allow only HTTP and HTTPS.
+        if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+            return null;
+        }
 
-        const parsedUrl = new URL(url);
+        // Restrict crawling to the starting domain.
+        if (
+            crawlerConfig.sameDomainOnly &&
+            parsedUrl.hostname !== site.parsedStartUrl.hostname
+        ) {
+            return null;
+        }
 
-        // Allow only HTTP and HTTPS
+        // Remove URL fragments.
+        parsedUrl.hash = "";
 
-        if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+        // Remove query parameters if configured.
+        if (crawlerConfig.removeQueryParameters) {
+            parsedUrl.search = "";
+        }
 
-            return null;
+        // Remove trailing slash except homepage.
+        if (parsedUrl.pathname !== "/") {
+            parsedUrl.pathname = parsedUrl.pathname.replace(/\/+$/, "");
+        }
 
-        }
+        return parsedUrl.href;
 
-        // Restrict crawling to the starting domain if enabled
-
-        if (
-
-            config.crawler.sameDomainOnly &&
-
-            parsedUrl.hostname !== parsedStartUrl.hostname
-
-        ) {
-
-            return null;
-
-        }
-
-        // Remove URL fragments
-
-        parsedUrl.hash = "";
-
-        // Remove query parameters if configured
-
-        if (config.crawler.removeQueryParameters) {
-
-            parsedUrl.search = "";
-
-        }
-
-        // Remove trailing slash except homepage
-
-        if (parsedUrl.pathname !== "/") {
-
-            parsedUrl.pathname = parsedUrl.pathname.replace(/\/+$/, "");
-
-        }
-
-        return parsedUrl.href;
-
-    } catch (error) {
-
-        return null;
-
-    }
-
+    } catch {
+        return null;
+    }
 }
 
 // ======================================
-
 // 5. EXTRACT WEBPAGE INFORMATION
-
 // ======================================
 
 async function extractPageData(page) {
+    return await page.evaluate(() => {
 
-    return await page.evaluate(() => {
-
+        // Exclude footer and contentinfo elements.
         const getElements = (selector, root = document) =>
             Array.from(root.querySelectorAll(selector))
-                .filter(element => !element.closest("footer, [role='contentinfo']"));
+                .filter(element =>
+                    !element.closest("footer, [role='contentinfo']")
+                );
 
         const getContentText = (element) => {
             const content = element.cloneNode(true);
-            content.querySelectorAll("footer, [role='contentinfo']")
+
+            content
+                .querySelectorAll("footer, [role='contentinfo']")
                 .forEach(element => element.remove());
+
             const container = document.createElement("div");
+
             container.style.position = "fixed";
             container.style.left = "-10000px";
+
             container.appendChild(content);
             document.body.appendChild(container);
+
             const text = content.innerText.trim();
+
             container.remove();
+
             return text;
         };
 
-        // Extract text from elements
-        const getText = (selector) => {
-
+        const getText = (selector) => {
             return getElements(selector)
-                .map(element => element.innerText.trim())
-                .filter(Boolean);
+                .map(element => element.innerText.trim())
+                .filter(Boolean);
+        };
 
-        };
+        const getAttributes = (element) => ({
+            id: element.id || "",
 
-        // Extract common attributes
+            className:
+                typeof element.className === "string"
+                    ? element.className
+                    : "",
 
-        const getAttributes = (element) => ({
+            ariaLabel: element.getAttribute("aria-label"),
 
-            id: element.id || "",
+            role: element.getAttribute("role")
+        });
 
-            className: typeof element.className === "string"
+        return {
 
-                ? element.className
+            // 1. Basic page information
 
-                : "",
+            pageTitle: document.title,
 
-            ariaLabel: element.getAttribute("aria-label"),
+            pageUrl: window.location.href,
 
-            role: element.getAttribute("role")
+            pageLanguage: document.documentElement.lang || "",
 
-        });
-
-        return {
-
-            // 1. Basic page information
-
-            pageTitle: document.title,
-
-            pageUrl: window.location.href,
-
-            pageLanguage: document.documentElement.lang || "",
-
-            pageCharset: document.characterSet,
+            pageCharset: document.characterSet,
 
             pageDescription: document.body
                 ? getContentText(document.body)
                 : "",
 
-            viewport: {
+            viewport: {
+                width: window.innerWidth,
+                height: window.innerHeight
+            },
 
-                width: window.innerWidth,
+            // 2. SEO information
 
-                height: window.innerHeight
+            seo: {
+                title: document.title,
 
-            },
+                description:
+                    document.querySelector('meta[name="description"]')
+                        ?.content || "",
 
-            // 2. SEO information
+                keywords:
+                    document.querySelector('meta[name="keywords"]')
+                        ?.content || "",
 
-            seo: {
+                author:
+                    document.querySelector('meta[name="author"]')
+                        ?.content || "",
 
-                title: document.title,
+                canonical:
+                    document.querySelector('link[rel="canonical"]')
+                        ?.href || "",
 
-                description:
+                robots:
+                    document.querySelector('meta[name="robots"]')
+                        ?.content || "",
 
-                    document.querySelector('meta[name="description"]')
+                openGraph: Array.from(
+                    document.querySelectorAll('meta[property^="og:"]')
+                ).map(meta => ({
+                    property: meta.getAttribute("property"),
+                    content: meta.content
+                })),
 
-                        ?.content || "",
+                twitter: Array.from(
+                    document.querySelectorAll('meta[name^="twitter:"]')
+                ).map(meta => ({
+                    name: meta.name,
+                    content: meta.content
+                }))
+            },
 
-                keywords:
+            // 3. Headings
 
-                    document.querySelector('meta[name="keywords"]')
+            headings: {
+                h1: getText("h1"),
+                h2: getText("h2"),
+                h3: getText("h3"),
+                h4: getText("h4"),
+                h5: getText("h5"),
+                h6: getText("h6")
+            },
 
-                        ?.content || "",
+            // 4. Paragraphs
 
-                author:
+            paragraphs: getText("p"),
 
-                    document.querySelector('meta[name="author"]')
-
-                        ?.content || "",
-
-                canonical:
-
-                    document.querySelector('link[rel="canonical"]')
-
-                        ?.href || "",
-
-                robots:
-
-                    document.querySelector('meta[name="robots"]')
-
-                        ?.content || "",
-
-                openGraph: Array.from(
-
-                    document.querySelectorAll('meta[property^="og:"]')
-
-                ).map(meta => ({
-
-                    property: meta.getAttribute("property"),
-
-                    content: meta.content
-
-                })),
-
-                twitter: Array.from(
-
-                    document.querySelectorAll('meta[name^="twitter:"]')
-
-                ).map(meta => ({
-
-                    name: meta.name,
-
-                    content: meta.content
-
-                }))
-
-            },
-
-            // 3. Headings
-
-            headings: {
-
-                h1: getText("h1"),
-
-                h2: getText("h2"),
-
-                h3: getText("h3"),
-
-                h4: getText("h4"),
-
-                h5: getText("h5"),
-
-                h6: getText("h6")
-
-            },
-
-            // 4. Paragraphs
-
-            paragraphs: getText("p"),
-
-            // 5. Navigation
+            // 5. Navigation
 
             navigation: getElements("nav").map(nav => ({
-
                 text: getContentText(nav),
 
                 links: getElements("a", nav).map(link => ({
+                    text: link.innerText.trim(),
+                    href: link.href,
+                    ...getAttributes(link)
+                }))
+            })),
 
-                    text: link.innerText.trim(),
-
-                    href: link.href,
-
-                    ...getAttributes(link)
-
-                }))
-
-            })),
-
-            // 6. Page sections
+            // 6. Page sections
 
             sections: getElements(
                 "main section, main article, body > section, body > article"
             ).map((section, index) => ({
+                sectionNumber: index + 1,
 
-                sectionNumber: index + 1,
-
-                tag: section.tagName.toLowerCase(),
+                tag: section.tagName.toLowerCase(),
 
                 heading: getElements(
                     "h1, h2, h3, h4, h5, h6",
@@ -447,592 +376,566 @@ async function extractPageData(page) {
 
                 text: getContentText(section),
 
-                ...getAttributes(section)
+                ...getAttributes(section)
+            })),
 
-            })),
-
-            // 7. Links
+            // 7. Links
 
             links: getElements("a").map(link => ({
+                text: link.innerText.trim(),
+                href: link.href,
+                target: link.target,
+                title: link.title,
+                ...getAttributes(link)
+            })),
 
-                text: link.innerText.trim(),
-
-                href: link.href,
-
-                target: link.target,
-
-                title: link.title,
-
-                ...getAttributes(link)
-
-            })),
-
-            // 8. Clickable elements
+            // 8. Clickable elements
 
             clickableElements: getElements(
-                "button, [role='button'], [onclick], input[type='button'], input[type='submit']"
+                "button, [role='button'], [onclick], " +
+                "input[type='button'], input[type='submit']"
             ).map(element => ({
+                tag: element.tagName.toLowerCase(),
 
-                tag: element.tagName.toLowerCase(),
+                text:
+                    element.innerText?.trim() ||
+                    element.value ||
+                    "",
 
-                text: element.innerText?.trim() || element.value || "",
+                type: element.type || "",
+                title: element.title || "",
 
-                type: element.type || "",
+                ...getAttributes(element)
+            })),
 
-                title: element.title || "",
-
-                ...getAttributes(element)
-
-            })),
-
-            // 9. Forms
+            // 9. Forms
 
             forms: getElements("form").map((form, index) => ({
+                formNumber: index + 1,
 
-                formNumber: index + 1,
+                action: form.action,
 
-                action: form.action,
-
-                method: form.method,
+                method: form.method,
 
                 fields: getElements(
                     "input, textarea, select, button",
                     form
                 ).map(field => ({
+                    tag: field.tagName.toLowerCase(),
 
-                    tag: field.tagName.toLowerCase(),
+                    type: field.type || "",
 
-                    type: field.type || "",
+                    name: field.name || "",
 
-                    name: field.name || "",
+                    id: field.id || "",
 
-                    id: field.id || "",
+                    placeholder: field.placeholder || "",
 
-                    placeholder: field.placeholder || "",
+                    required: field.required,
 
-                    required: field.required,
+                    // Do not store password values.
+                    value:
+                        field.type === "password"
+                            ? ""
+                            : field.value || "",
 
-                    // Do not store password values
+                    ...getAttributes(field)
+                }))
+            })),
 
-                    value: field.type === "password"
+            // 10. Input elements
 
-                        ? ""
+            inputs: getElements(
+                "input, textarea, select"
+            ).map(input => ({
+                tag: input.tagName.toLowerCase(),
 
-                        : field.value || "",
+                type: input.type || "",
 
-                    ...getAttributes(field)
+                name: input.name || "",
 
-                }))
+                id: input.id || "",
 
-            })),
+                placeholder: input.placeholder || "",
 
-            // 10. Input elements
+                required: input.required,
 
-            inputs: getElements("input, textarea, select").map(input => ({
+                ...getAttributes(input)
+            })),
 
-                tag: input.tagName.toLowerCase(),
-
-                type: input.type || "",
-
-                name: input.name || "",
-
-                id: input.id || "",
-
-                placeholder: input.placeholder || "",
-
-                required: input.required,
-
-                ...getAttributes(input)
-
-            })),
-
-            // 11. Images
+            // 11. Images
 
             images: getElements("img").map(image => ({
+                src: image.src,
 
-                src: image.src,
+                alt: image.alt || "",
 
-                alt: image.alt || "",
+                title: image.title || "",
 
-                title: image.title || "",
+                width: image.naturalWidth,
 
-                width: image.naturalWidth,
+                height: image.naturalHeight,
 
-                height: image.naturalHeight,
+                loading: image.loading
+            })),
 
-                loading: image.loading
-
-            })),
-
-            // 12. Tables
+            // 12. Tables
 
             tables: getElements("table").map((table, index) => ({
-
-                tableNumber: index + 1,
+                tableNumber: index + 1,
 
                 headers: getElements("thead th", table)
                     .map(th => th.innerText.trim()),
 
                 rows: getElements("tbody tr", table).map(row =>
-
                     getElements("th, td", row)
                         .map(cell => cell.innerText.trim())
+                )
+            })),
 
-                )
+            // 13. Accessibility
 
-            })),
-
-
-            // 14. Accessibility
-
-            accessibility: {
-
+            accessibility: {
                 landmarks: getElements(
                     "header, nav, main, aside, [role]"
                 ).map(element => ({
+                    tag: element.tagName.toLowerCase(),
 
-                    tag: element.tagName.toLowerCase(),
+                    role: element.getAttribute("role"),
 
-                    role: element.getAttribute("role"),
+                    ariaLabel: element.getAttribute("aria-label")
+                })),
 
-                    ariaLabel: element.getAttribute("aria-label")
+                elementsWithoutAlt:
+                    getElements("img:not([alt])").length,
 
-                })),
+                buttonsWithoutLabel:
+                    getElements("button").filter(button =>
+                        !button.innerText.trim() &&
+                        !button.getAttribute("aria-label")
+                    ).length
+            },
 
-                elementsWithoutAlt: getElements("img:not([alt])").length,
-
-                buttonsWithoutLabel: getElements("button").filter(button =>
-
-                    !button.innerText.trim() &&
-
-                    !button.getAttribute("aria-label")
-
-                ).length
-
-            },
-
-            // 15. Structured data
+            // 14. Structured data
 
             structuredData: getElements(
                 'script[type="application/ld+json"]'
             ).map(script => {
-
-                try {
-
-                    return JSON.parse(script.textContent);
-
-                } catch {
-
-                    return script.textContent;
-
-                }
-
-            })
-
-        };
-
-    });
-
+                try {
+                    return JSON.parse(script.textContent);
+                } catch {
+                    return script.textContent;
+                }
+            })
+        };
+    });
 }
 
 // ======================================
+// 6. LOGIN HANDLING
+// ======================================
 
-async function loginIfEnabled(page) {
+async function loginIfEnabled(page, site) {
+
+    const auth = site.auth;
 
     if (!auth.enabled) {
-
+        console.log(`${site.name}: Login not required.`);
         return;
-
     }
 
-    const response = await page.goto(auth.loginUrl, {
+    console.log(`${site.name}: Opening login page...`);
 
-        waitUntil: config.crawler.waitUntil,
-
-        timeout: config.crawler.timeout
-
+    // Admin and Client URLs directly open their login forms.
+    const response = await page.goto(site.startUrl, {
+        waitUntil: crawlerConfig.waitUntil,
+        timeout: crawlerConfig.timeout
     });
 
     if (!response || response.status() >= 400) {
-
-        throw new Error("Unable to load the configured login page");
-
+        throw new Error(
+            `${site.name}: Unable to load the login page.`
+        );
     }
 
-    await page.locator(auth.usernameSelector)
-        .fill(process.env.CRAWLER_USERNAME);
+    console.log(`${site.name}: Entering login credentials...`);
 
-    await page.locator(auth.passwordSelector)
-        .fill(process.env.CRAWLER_PASSWORD);
+    await page.locator(auth.usernameSelector).fill(auth.username);
+
+    await page.locator(auth.passwordSelector).fill(auth.password);
 
     await page.locator(auth.submitSelector).click();
 
+    // Option 1: Wait for a configured success URL.
     if (auth.successUrl) {
-
         await page.waitForURL(auth.successUrl, {
-
-            timeout: config.crawler.timeout
-
+            timeout: crawlerConfig.timeout
         });
-
-    } else {
-
-        await page.locator(auth.successSelector).waitFor({
-
-            state: "visible",
-
-            timeout: config.crawler.timeout
-
-        });
-
     }
 
+    // Option 2: Wait for a configured element after login.
+    else if (auth.successSelector) {
+        await page.locator(auth.successSelector).waitFor({
+            state: "visible",
+            timeout: crawlerConfig.timeout
+        });
+    }
+
+    // Option 3: Check that the login form disappears.
+    else {
+        await page.locator(auth.usernameSelector).waitFor({
+            state: "hidden",
+            timeout: crawlerConfig.timeout
+        });
+
+        await page.locator(auth.passwordSelector).waitFor({
+            state: "hidden",
+            timeout: crawlerConfig.timeout
+        });
+    }
+
+    console.log(`${site.name}: Login successful.`);
 }
 
 // ======================================
-
-// 6. MAIN CRAWLER
-
+// 7. CRAWL ONE WEBSITE
 // ======================================
 
-async function crawlWebsite() {
+async function crawlWebsite(siteConfig) {
 
-    const browser = await chromium.launch({
+    // Resolve this website's URL and credentials.
+    const site = resolveWebsiteConfig(siteConfig);
 
-        headless: config.browser.headless
+    console.log("\n================================");
+    console.log("STARTING WEBSITE CRAWL");
+    console.log("Website:", site.name);
+    console.log("URL:", site.startUrl);
+    console.log("================================\n");
 
-    });
+    // Separate storage for every website.
+    const OUTPUT_FOLDER = path.join(
+        OUTPUT_ROOT,
+        site.id
+    );
 
-    const page = await browser.newPage({
+    const PAGES_FOLDER = path.join(
+        OUTPUT_FOLDER,
+        "pages"
+    );
 
-        viewport: {
+    // Separate crawler state for every website.
+    const visitedUrls = new Set();
 
-            width: config.browser.width,
+    const urlQueue = [site.startUrl];
 
-            height: config.browser.height
+    const websiteData = {
+        websiteName: site.name,
 
-        }
+        website: site.startUrl,
 
-    });
+        crawledAt: new Date().toISOString(),
 
-    try {
+        totalPages: 0,
 
-        await loginIfEnabled(page);
+        failedPages: [],
 
-        // Create output directory
+        pages: []
+    };
 
-        fs.mkdirSync(OUTPUT_FOLDER, {
+    const browser = await chromium.launch({
+        headless: browserConfig.headless
+    });
 
-            recursive: true
+    const page = await browser.newPage({
+        viewport: {
+            width: browserConfig.width,
+            height: browserConfig.height
+        }
+    });
 
-        });
+    try {
 
-        if (
+        // Login if required.
+        await loginIfEnabled(page, site);
 
-            config.output.saveIndividualJson ||
+        // Create output directories automatically.
+        fs.mkdirSync(OUTPUT_FOLDER, {
+            recursive: true
+        });
 
-            config.output.saveScreenshots
+        if (
+            outputConfig.saveIndividualJson ||
+            outputConfig.saveScreenshots
+        ) {
+            fs.mkdirSync(PAGES_FOLDER, {
+                recursive: true
+            });
+        }
 
-        ) {
-
-            fs.mkdirSync(PAGES_FOLDER, {
-
-                recursive: true
-
-            });
-
-        }
-
-        // Crawl pages
+        // ======================================
+        // CRAWL PAGES
+        // ======================================
 
         while (urlQueue.length > 0) {
 
-            const currentUrl = urlQueue.shift();
+            // Stop when the configured page limit is reached.
+            if (
+                MAX_PAGES > 0 &&
+                websiteData.totalPages >= MAX_PAGES
+            ) {
+                console.log(
+                    `${site.name}: Maximum page limit reached.`
+                );
+                break;
+            }
 
-            const normalizedUrl = normalizeUrl(currentUrl);
+            const currentUrl = urlQueue.shift();
 
-            // Skip invalid or visited URLs
+            const normalizedUrl = normalizeUrl(
+                currentUrl,
+                site
+            );
 
-            if (
+            // Skip invalid or already visited URLs.
+            if (
+                !normalizedUrl ||
+                visitedUrls.has(normalizedUrl)
+            ) {
+                continue;
+            }
 
-                !normalizedUrl ||
+            visitedUrls.add(normalizedUrl);
 
-                visitedUrls.has(normalizedUrl)
+            console.log("\nCrawling:", normalizedUrl);
 
-            ) {
+            try {
 
-                continue;
+                // Open webpage.
+                const response = await page.goto(normalizedUrl, {
+                    waitUntil: crawlerConfig.waitUntil,
+                    timeout: crawlerConfig.timeout
+                });
 
-            }
+                // Wait for dynamic content.
+                await page.waitForTimeout(
+                    crawlerConfig.waitTime
+                );
 
-            visitedUrls.add(normalizedUrl);
+                // Check HTTP response.
+                if (!response || response.status() >= 400) {
 
-            console.log("Crawling:", normalizedUrl);
+                    websiteData.failedPages.push({
+                        url: normalizedUrl,
 
-            try {
+                        status: response
+                            ? response.status()
+                            : null,
 
-                // Open webpage
+                        error: "Page returned an unsuccessful response"
+                    });
 
-                const response = await page.goto(normalizedUrl, {
+                    continue;
+                }
 
-                    waitUntil: config.crawler.waitUntil,
-
-                    timeout: config.crawler.timeout
-
-                });
-
-                // Wait for dynamic content
-
-                await page.waitForTimeout(
-
-                    config.crawler.waitTime
-
-                );
-
-                // Check HTTP response
-
-                if (!response || response.status() >= 400) {
-
-                    websiteData.failedPages.push({
-
-                        url: normalizedUrl,
-
-                        status: response
-
-                            ? response.status()
-
-                            : null,
-
-                        error: "Page returned an unsuccessful response"
-
-                    });
-
-                    continue;
-
-                }
-
+                // Check final redirected URL.
                 const finalUrl = new URL(page.url());
 
                 if (
-                    config.crawler.sameDomainOnly &&
-                    finalUrl.hostname !== parsedStartUrl.hostname
+                    crawlerConfig.sameDomainOnly &&
+                    finalUrl.hostname !== site.parsedStartUrl.hostname
                 ) {
-
                     websiteData.failedPages.push({
-
                         url: normalizedUrl,
 
                         status: response.status(),
 
-                        error: "Page redirected outside the allowed domain and was skipped"
-
+                        error:
+                            "Page redirected outside the allowed domain."
                     });
 
                     continue;
-
                 }
 
-                // Extract webpage data
+                // ======================================
+                // EXTRACT PAGE INFORMATION
+                // ======================================
 
-                const pageData = await extractPageData(page);
+                const pageData = await extractPageData(page);
 
-                pageData.httpStatus = response.status();
+                pageData.httpStatus = response.status();
 
-                pageData.crawledAt = new Date().toISOString();
+                pageData.crawledAt = new Date().toISOString();
 
-                // Generate page folder name
+                // Generate page folder name.
+                const pageNumber = websiteData.pages.length + 1;
 
-                const pageNumber = websiteData.pages.length + 1;
+                const folderName = generateFolderName(
+                    pageData,
+                    pageNumber
+                );
 
-                const folderName = generateFolderName(
+                const pageFolder = path.join(
+                    PAGES_FOLDER,
+                    folderName
+                );
 
-                    pageData,
+                if (
+                    outputConfig.saveIndividualJson ||
+                    outputConfig.saveScreenshots
+                ) {
+                    fs.mkdirSync(pageFolder, {
+                        recursive: true
+                    });
+                }
 
-                    pageNumber
+                // ======================================
+                // SAVE SCREENSHOT
+                // ======================================
 
-                );
+                let screenshotRelativePath = null;
 
-                const pageFolder = path.join(
+                if (outputConfig.saveScreenshots) {
 
-                    PAGES_FOLDER,
+                    const screenshotPath = path.join(
+                        pageFolder,
+                        "screenshot.png"
+                    );
 
-                    folderName
+                    try {
 
-                );
+                        await page.screenshot({
+                            path: screenshotPath,
 
-                // Create individual page folder
+                            fullPage:
+                                outputConfig.fullPageScreenshot,
 
-                if (
+                            animations: "disabled"
+                        });
 
-                    config.output.saveIndividualJson ||
+                        pageData.screenshot = "screenshot.png";
 
-                    config.output.saveScreenshots
+                        screenshotRelativePath =
+                            `pages/${folderName}/screenshot.png`;
 
-                ) {
+                        console.log(
+                            "Screenshot saved:",
+                            folderName
+                        );
 
-                    fs.mkdirSync(pageFolder, {
+                    } catch (screenshotError) {
 
-                        recursive: true
+                        pageData.screenshot = null;
 
-                    });
+                        pageData.screenshotError =
+                            screenshotError.message;
+                    }
 
-                }
+                } else {
+                    pageData.screenshot = null;
+                }
 
-                // Screenshot
+                // ======================================
+                // SAVE INDIVIDUAL JSON
+                // ======================================
 
-                let screenshotRelativePath = null;
+                let jsonRelativePath = null;
 
-                if (config.output.saveScreenshots) {
+                if (outputConfig.saveIndividualJson) {
 
-                    const screenshotPath = path.join(
+                    const jsonPath = path.join(
+                        pageFolder,
+                        "page.json"
+                    );
 
-                        pageFolder,
+                    fs.writeFileSync(
+                        jsonPath,
+                        JSON.stringify(pageData, null, 2),
+                        "utf8"
+                    );
 
-                        "screenshot.png"
+                    jsonRelativePath =
+                        `pages/${folderName}/page.json`;
+                }
 
-                    );
+                // ======================================
+                // ADD PAGE TO SUMMARY
+                // ======================================
 
-                    try {
+                websiteData.pages.push({
+                    pageNumber,
 
-                        await page.screenshot({
+                    pageTitle: pageData.pageTitle,
 
-                            path: screenshotPath,
+                    pageUrl: pageData.pageUrl,
 
-                            fullPage: config.output.fullPageScreenshot,
+                    httpStatus: pageData.httpStatus,
 
-                            animations: "disabled"
+                    folder: folderName,
 
-                        });
+                    json: jsonRelativePath,
 
-                        pageData.screenshot = "screenshot.png";
+                    screenshot: screenshotRelativePath
+                });
 
-                        screenshotRelativePath =
+                websiteData.totalPages =
+                    websiteData.pages.length;
 
-                            `pages/${folderName}/screenshot.png`;
+                console.log(
+                    "Completed:",
+                    pageData.pageTitle
+                );
 
-                        console.log(
-
-                            "Screenshot saved:",
-
-                            folderName
-
-                        );
-
-                    } catch (screenshotError) {
-
-                        pageData.screenshot = null;
-
-                        pageData.screenshotError =
-
-                            screenshotError.message;
-
-                    }
-
-                } else {
-
-                    pageData.screenshot = null;
-
-                }
-
-                // Save individual JSON
-
-                let jsonRelativePath = null;
-
-                if (config.output.saveIndividualJson) {
-
-                    const jsonPath = path.join(
-
-                        pageFolder,
-
-                        "page.json"
-
-                    );
-
-                    fs.writeFileSync(
-
-                        jsonPath,
-
-                        JSON.stringify(pageData, null, 2),
-
-                        "utf8"
-
-                    );
-
-                    jsonRelativePath =
-
-                        `pages/${folderName}/page.json`;
-
-                }
-
-                // Add page to summary
-
-                websiteData.pages.push({
-
-                    pageNumber,
-
-                    pageTitle: pageData.pageTitle,
-
-                    pageUrl: pageData.pageUrl,
-
-                    httpStatus: pageData.httpStatus,
-
-                    folder: folderName,
-
-                    json: jsonRelativePath,
-
-                    screenshot: screenshotRelativePath
-
-                });
-
-                websiteData.totalPages = websiteData.pages.length;
-
-                console.log(
-
-                    "Completed:",
-
-                    pageData.pageTitle
-
-                );
-
-                // Discover internal links
+                // ======================================
+                // DISCOVER INTERNAL LINKS
+                // ======================================
 
                 const tableEntryUrls = new Set(
-                    (await page.locator("table a[href]").evaluateAll(anchors =>
-                        anchors.map(anchor => anchor.href)
-                    ))
-                        .map(normalizeUrl)
+                    (
+                        await page.locator("table a[href]").evaluateAll(
+                            anchors => anchors.map(anchor => anchor.href)
+                        )
+                    )
+                        .map(url => normalizeUrl(url, site))
                         .filter(Boolean)
                 );
+
                 const dataEntryGroups = new Map();
 
                 for (const link of pageData.links) {
 
-                    const discoveredUrl = normalizeUrl(link.href);
+                    const discoveredUrl = normalizeUrl(
+                        link.href,
+                        site
+                    );
 
                     if (!discoveredUrl) {
-
                         continue;
-
                     }
 
-                    const segments = new URL(discoveredUrl).pathname
+                    const segments = new URL(discoveredUrl)
+                        .pathname
                         .split("/")
                         .filter(Boolean);
 
-                    if (segments.length >= 3 && segments[0].toLowerCase() === "data") {
+                    if (
+                        segments.length >= 3 &&
+                        segments[0].toLowerCase() === "data"
+                    ) {
 
-                        const groupKey = `/data/${segments[1].toLowerCase()}`;
+                        const groupKey =
+                            `/data/${segments[1].toLowerCase()}`;
 
                         if (!dataEntryGroups.has(groupKey)) {
-
-                            dataEntryGroups.set(groupKey, new Set());
-
+                            dataEntryGroups.set(
+                                groupKey,
+                                new Set()
+                            );
                         }
 
-                        dataEntryGroups.get(groupKey).add(discoveredUrl);
-
+                        dataEntryGroups
+                            .get(groupKey)
+                            .add(discoveredUrl);
                     }
-
                 }
 
                 const entryLinkUrls = new Set(tableEntryUrls);
@@ -1040,188 +943,180 @@ async function crawlWebsite() {
                 for (const urls of dataEntryGroups.values()) {
 
                     if (urls.size > 1) {
-
                         for (const url of urls) {
-
                             entryLinkUrls.add(url);
-
                         }
-
                     }
-
                 }
 
                 let queuedEntryLinks = 0;
 
                 for (const link of pageData.links) {
 
-                    const discoveredUrl = normalizeUrl(link.href);
+                    const discoveredUrl = normalizeUrl(
+                        link.href,
+                        site
+                    );
 
                     if (!discoveredUrl) {
-
                         continue;
-
                     }
 
-                    const isEntryLink = entryLinkUrls.has(discoveredUrl);
+                    const isEntryLink =
+                        entryLinkUrls.has(discoveredUrl);
 
                     if (
                         isEntryLink &&
-                        queuedEntryLinks >= MAX_ENTRY_LINKS_PER_PAGE
+                        queuedEntryLinks >=
+                            crawlerConfig.maxEntryLinksPerPage
                     ) {
-
                         continue;
-
                     }
 
-                    if (
-                        !visitedUrls.has(discoveredUrl) &&
-                        !urlQueue.includes(discoveredUrl)
-                    ) {
+                    if (
+                        !visitedUrls.has(discoveredUrl) &&
+                        !urlQueue.includes(discoveredUrl)
+                    ) {
 
-                        urlQueue.push(discoveredUrl);
+                        urlQueue.push(discoveredUrl);
 
                         if (isEntryLink) {
-
                             queuedEntryLinks += 1;
-
                         }
+                    }
+                }
 
-                    }
-                }
+                // Delay between pages.
+                await page.waitForTimeout(
+                    crawlerConfig.delayBetweenPages
+                );
 
-                // Delay between pages
+            } catch (error) {
 
-                await page.waitForTimeout(
+                console.log(
+                    "Error crawling:",
+                    normalizedUrl
+                );
 
-                    config.crawler.delayBetweenPages
+                websiteData.failedPages.push({
+                    url: normalizedUrl,
+                    error: error.message
+                });
+            }
+        }
 
-                );
+        // ======================================
+        // 8. SAVE CRAWL SUMMARY
+        // ======================================
 
-            } catch (error) {
+        if (outputConfig.saveSummary) {
 
-                console.log(
+            const summaryPath = path.join(
+                OUTPUT_FOLDER,
+                "crawl-summary.json"
+            );
 
-                    "Error crawling:",
+            fs.writeFileSync(
+                summaryPath,
+                JSON.stringify(websiteData, null, 2),
+                "utf8"
+            );
 
-                    normalizedUrl
+            console.log(
+                "\nSummary JSON:",
+                summaryPath
+            );
+        }
 
-                );
+        // ======================================
+        // 9. FINAL REPORT
+        // ======================================
 
-                websiteData.failedPages.push({
+        console.log("\n--------------------------------");
 
-                    url: normalizedUrl,
+        console.log("Website crawling completed!");
 
-                    error: error.message
+        console.log("Website:", site.name);
 
-                });
+        console.log(
+            "Total successful pages:",
+            websiteData.totalPages
+        );
 
-            }
+        console.log(
+            "Failed pages:",
+            websiteData.failedPages.length
+        );
 
-        }
+        console.log(
+            "Pages remaining in queue:",
+            urlQueue.length
+        );
 
-        // ======================================
+        console.log("Output folder:", OUTPUT_FOLDER);
 
-        // 7. SAVE CRAWL SUMMARY
+        console.log("--------------------------------\n");
 
-        // ======================================
+    } finally {
 
-        if (config.output.saveSummary) {
-
-            const summaryPath = path.join(
-
-                OUTPUT_FOLDER,
-
-                "crawl-summary.json"
-
-            );
-
-            fs.writeFileSync(
-
-                summaryPath,
-
-                JSON.stringify(websiteData, null, 2),
-
-                "utf8"
-
-            );
-
-            console.log(
-
-                "Summary JSON:",
-
-                summaryPath
-
-            );
-
-        }
-
-        // ======================================
-
-        // 8. FINAL REPORT
-
-        // ======================================
-
-        console.log("--------------------------------");
-
-        console.log("Website crawling completed!");
-
-        console.log(
-
-            "Website:",
-
-            config.website.name
-
-        );
-
-        console.log(
-
-            "Total successful pages:",
-
-            websiteData.totalPages
-
-        );
-
-        console.log(
-
-            "Failed pages:",
-
-            websiteData.failedPages.length
-
-        );
-
-        console.log(
-            "Pages remaining in queue:",
-            urlQueue.length
-        );
-
-        console.log(
-
-            "Output folder:",
-
-            OUTPUT_FOLDER
-
-        );
-
-        console.log("--------------------------------");
-
-    } finally {
-
-        await browser.close();
-
-    }
-
+        await browser.close();
+    }
 }
 
 // ======================================
-
-// 9. EXECUTE CRAWLER
-
+// 10. RUN ALL WEBSITES
 // ======================================
 
-crawlWebsite()
+async function runAllWebsites() {
+
+    const results = [];
+
+    for (const site of config.websites) {
+
+        try {
+
+            await crawlWebsite(site);
+
+            results.push({
+                website: site.name,
+                status: "Completed"
+            });
+
+        } catch (error) {
+
+            console.error(
+                `\n${site.name} crawling failed:`,
+                error.message
+            );
+
+            results.push({
+                website: site.name,
+                status: "Failed",
+                error: error.message
+            });
+
+            // Continue with the remaining websites.
+        }
+    }
+
+    // ======================================
+    // FINAL OVERALL REPORT
+    // ======================================
+
+    console.log("\n================================");
+    console.log("ALL WEBSITE CRAWLS FINISHED");
+    console.log("================================");
+
+    console.table(results);
+}
+
+// ======================================
+// 11. EXECUTE CRAWLER
+// ======================================
+
+runAllWebsites()
     .then(() => {
-        console.log("Crawler finished successfully!");
+        console.log("All crawler processes finished.");
     })
     .catch(error => {
         console.error("Crawler failed:", error);

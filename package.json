@@ -16,5 +16,13 @@
   },
   "dependencies": {
     "playwright": "^1.65.1"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shruti-Verma64894/USER_GUIDE.git"
+  },
+  "bugs": {
+    "url": "https://github.com/shruti-Verma64894/USER_GUIDE/issues"
+  },
+  "homepage": "https://github.com/shruti-Verma64894/USER_GUIDE#readme"
 }

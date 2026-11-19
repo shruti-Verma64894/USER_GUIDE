@@ -1,0 +1,75 @@
+name: Pipeline 1 - Frontend Crawler
+ 
+on:
+  schedule:
+    - cron: '30 18 * * *' # 12:00 AM IST
+  workflow_dispatch: # Manual test button
+ 
+jobs:
+  crawl-portals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: mcr.microsoft.com/playwright:v1.65.1-noble
+ 
+    strategy:
+      fail-fast: false
+      matrix:
+        portal:
+          - id: portal-1
+            name: GovCon360
+            url: https://www.nlproducts.net/
+            auth_enabled: false
+ 
+    steps:
+      - name: Checkout Crawler Repo
+        uses: actions/checkout@v4
+ 
+      - name: Install Dependencies
+        run: npm ci
+ 
+      - name: Patch config.json for Current Portal
+        run: |
+          jq --arg name "${{ matrix.portal.name }}" \
+             --arg url "${{ matrix.portal.url }}" \
+             --argjson auth ${{ matrix.portal.auth_enabled }} \
+             '.website.name = $name | .website.startUrl = $url | .auth.enabled = $auth | .output.saveScreenshots = false' \
+             config.json > config.tmp.json && mv config.tmp.json config.json
+ 
+      - name: Run Playwright Crawler
+        run: node crawler.js
+ 
+      - name: Normalize JSON & Push to Central Docs Repo
+        id: push_data
+        run: |
+          git clone https://x-access-token:${{ secrets.CENTRAL_REPO_PAT }}@github.com/harshh122/central-docs-hub.git central-docs
+          mkdir -p central-docs/data/inbox/${{ matrix.portal.id }}/frontend
+ 
+          find output -name "*.json" | while read -r file; do
+            rel_path="${file#output/}"
+            mkdir -p "central-docs/data/inbox/${{ matrix.portal.id }}/frontend/$(dirname "$rel_path")"
+            jq -S -c . "$file" > "central-docs/data/inbox/${{ matrix.portal.id }}/frontend/$rel_path"
+          done
+ 
+          cd central-docs
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/inbox/${{ matrix.portal.id }}/frontend
+ 
+          if git diff --staged --quiet; then
+            echo "No JSON changes for ${{ matrix.portal.id }}."
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            git commit -m "chore: update ${{ matrix.portal.id }} frontend JSON"
+            git push
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+ 
+      - name: Trigger Central Hub (Pipeline 3)
+        if: steps.push_data.outputs.changed == 'true'
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CENTRAL_REPO_PAT }}
+          repository: harshh122/central-docs-hub
+          event-type: json-data-updated
+          client-payload: '{"portal": "${{ matrix.portal.id }}", "source": "frontend"}'

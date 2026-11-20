@@ -12,23 +12,25 @@
     {
       "id": "admin",
       "name": "GovCon360 Admin",
-      "startUrlEnv": "ADMIN_URL",
-      "usernameEnv": "ADMIN_USERNAME",
-      "passwordEnv": "ADMIN_PASSWORD",
-     "auth": {
-      "enabled": true,
-      "usernameSelector": "#exampleInputEmail1",
-      "passwordSelector": "#exampleInputPassword1",
-      "submitSelector": "button[type='submit'].submit_btn"    }
+      "loginUrlEnv": "ADMIN_URL",
+      "auth": {
+        "enabled": true,
+        "usernameEnv": "ADMIN_USERNAME",
+        "passwordEnv": "ADMIN_PASSWORD",
+        "usernameSelector": "#exampleInputEmail1",
+        "passwordSelector": "#exampleInputPassword1",
+        "submitSelector": "button[type='submit'].submit_btn",
+        "successUrlPath": "/accounts-home"
+      }
     },
     {
       "id": "client",
       "name": "GovCon360 Client",
-      "startUrlEnv": "CLIENT_URL",
-      "usernameEnv": "CLIENT_USERNAME",
-      "passwordEnv": "CLIENT_PASSWORD",
+      "loginUrlEnv": "CLIENT_URL",
       "auth": {
         "enabled": true,
+        "usernameEnv": "CLIENT_USERNAME",
+        "passwordEnv": "CLIENT_PASSWORD",
         "usernameSelector": "#username",
         "passwordSelector": "#password",
         "submitSelector": "#kc-login"
@@ -44,17 +46,21 @@
     "waitTime": 1500,
     "delayBetweenPages": 500,
     "timeout": 90000,
-    "waitUntil": "networkidle",
+    "waitUntil": "domcontentloaded",
     "sameDomainOnly": true,
-    "removeQueryParameters": true,
-    "maxEntryLinksPerPage": 1,
-    "maxPages": 2
+    "maxPages": 0,
+    "ignoredQueryParameters": [
+      "utm_source",
+      "utm_medium",
+      "utm_campaign",
+      "fbclid",
+      "gclid"
+    ]
   },
   "output": {
     "folder": "output",
     "saveIndividualJson": true,
-    "saveScreenshots": true,
-    "saveSummary": true,
-    "fullPageScreenshot": true
+    "saveScreenshots": true
   }
 }
+

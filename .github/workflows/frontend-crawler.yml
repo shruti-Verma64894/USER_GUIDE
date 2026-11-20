@@ -9,6 +9,7 @@ jobs:
    timeout-minutes: 15
    container:
      image: mcr.microsoft.com/playwright:v1.65.1-noble
+     options: --cap-add=NET_ADMIN --device=/dev/net/tun
    steps:
      - name: Checkout Crawler Repo
        uses: actions/checkout@v4
@@ -18,6 +19,34 @@ jobs:
          chmod +x /usr/local/bin/jq
      - name: Install Dependencies
        run: npm ci
+     - name: Connect to OpenVPN
+       env:
+         VPN_CONFIG_BASE64: ${{ secrets.VPN_CONFIG_BASE64 }}
+         VPN_USERNAME: ${{ secrets.VPN_USERNAME }}
+         VPN_PASSWORD: ${{ secrets.VPN_PASSWORD }}
+       run: |
+         apt-get update && apt-get install -y openvpn iproute2
+         echo "$VPN_CONFIG_BASE64" | base64 -d > /tmp/client.ovpn
+         if [ -n "$VPN_USERNAME" ] && [ -n "$VPN_PASSWORD" ]; then
+           printf "%s\n%s\n" "$VPN_USERNAME" "$VPN_PASSWORD" > /tmp/auth.txt
+           chmod 600 /tmp/auth.txt
+           openvpn --config /tmp/client.ovpn --auth-user-pass /tmp/auth.txt --daemon --log /tmp/openvpn.log
+         else
+           openvpn --config /tmp/client.ovpn --daemon --log /tmp/openvpn.log
+         fi
+         # Wait up to 30s for the VPN tunnel (tun0) to come up
+         for i in $(seq 1 15); do
+           if ip link show tun0 >/dev/null 2>&1; then
+             echo "OpenVPN connected successfully (tun0 is up)."
+             break
+           fi
+           sleep 2
+         done
+         if ! ip link show tun0 >/dev/null 2>&1; then
+           echo "OpenVPN failed to connect. Logs:"
+           cat /tmp/openvpn.log
+           exit 1
+         fi
      - name: Run Playwright Crawler
        env:
          PUBLIC_URL: ${{ vars.PUBLIC_URL }}
@@ -28,6 +57,11 @@ jobs:
          CLIENT_USERNAME: ${{ secrets.CLIENT_USERNAME }}
          CLIENT_PASSWORD: ${{ secrets.CLIENT_PASSWORD }}
        run: xvfb-run --auto-servernum node crawler.js
+     - name: Disconnect OpenVPN
+       if: always()
+       run: |
+         pkill openvpn || true
+         rm -f /tmp/client.ovpn /tmp/auth.txt /tmp/openvpn.log
      - name: Normalize JSON & Push to Central Docs Repo
        id: push_data
        run: |

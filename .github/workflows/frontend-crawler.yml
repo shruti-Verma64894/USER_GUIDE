@@ -35,9 +35,9 @@ jobs:
          if grep -q "auth-user-pass" /tmp/client.ovpn && [ -n "$VPN_USERNAME" ]; then
            printf "%s\n%s\n" "$VPN_USERNAME" "$VPN_PASSWORD" > /tmp/auth.txt
            chmod 600 /tmp/auth.txt
-           openvpn --config /tmp/client.ovpn --askpass /tmp/keypass.txt --auth-user-pass /tmp/auth.txt --daemon --log /tmp/openvpn.log
+           openvpn --config /tmp/client.ovpn --askpass /tmp/keypass.txt --auth-user-pass /tmp/auth.txt --daemon --writepid /tmp/openvpn.pid --log /tmp/openvpn.log
          else
-           openvpn --config /tmp/client.ovpn --askpass /tmp/keypass.txt --daemon --log /tmp/openvpn.log
+           openvpn --config /tmp/client.ovpn --askpass /tmp/keypass.txt --daemon --writepid /tmp/openvpn.pid --log /tmp/openvpn.log
          fi
          # Wait up to 30s for the VPN tunnel (tun0) to come up
          for i in $(seq 1 15); do
@@ -65,8 +65,18 @@ jobs:
      - name: Disconnect OpenVPN
        if: always()
        run: |
-         pkill openvpn || true
-         rm -f /tmp/client.ovpn /tmp/auth.txt /tmp/keypass.txt /tmp/openvpn.log
+         if [ -f /tmp/openvpn.pid ]; then
+           kill -TERM "$(cat /tmp/openvpn.pid)" || true
+         fi
+         # Wait up to 10s for tun0 to close and default routes to restore
+         for i in $(seq 1 10); do
+           if ! ip link show tun0 >/dev/null 2>&1; then
+             echo "OpenVPN disconnected cleanly (tun0 removed)."
+             break
+           fi
+           sleep 1
+         done
+         rm -f /tmp/client.ovpn /tmp/auth.txt /tmp/keypass.txt /tmp/openvpn.log /tmp/openvpn.pid
      - name: Normalize JSON & Push to Central Docs Repo
        id: push_data
        run: |

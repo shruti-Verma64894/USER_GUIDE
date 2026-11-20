@@ -77,25 +77,32 @@ jobs:
            sleep 1
          done
          rm -f /tmp/client.ovpn /tmp/auth.txt /tmp/keypass.txt /tmp/openvpn.log /tmp/openvpn.pid
-     - name: Normalize JSON & Push to Central Docs Repo
+     - name: Normalize JSON, Copy Images & Push to Central Docs Repo
        id: push_data
        run: |
          git clone https://x-access-token:${{ secrets.CENTRAL_REPO_PAT }}@github.com/harshh122/central-docs-hub.git central-docs
          mkdir -p central-docs/data/inbox/portal-1/frontend
-         find output -name "*.json" | while read -r file; do
+         # 1. Normalize and copy JSON files
+         find output -type f -name "*.json" | while read -r file; do
            rel_path="${file#output/}"
            mkdir -p "central-docs/data/inbox/portal-1/frontend/$(dirname "$rel_path")"
            jq -S -c . "$file" > "central-docs/data/inbox/portal-1/frontend/$rel_path"
+         done
+         # 2. Copy screenshots in their original image format
+         find output -type f \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.webp" \) | while read -r file; do
+           rel_path="${file#output/}"
+           mkdir -p "central-docs/data/inbox/portal-1/frontend/$(dirname "$rel_path")"
+           cp "$file" "central-docs/data/inbox/portal-1/frontend/$rel_path"
          done
          cd central-docs
          git config user.name "github-actions[bot]"
          git config user.email "github-actions[bot]@users.noreply.github.com"
          git add data/inbox/portal-1/frontend
          if git diff --staged --quiet; then
-           echo "No JSON changes for portal-1."
+           echo "No changes for portal-1."
            echo "changed=false" >> $GITHUB_OUTPUT
          else
-           git commit -m "chore: update portal-1 frontend JSON"
+           git commit -m "chore: update portal-1 frontend JSON and screenshots"
            git push
            echo "changed=true" >> $GITHUB_OUTPUT
          fi

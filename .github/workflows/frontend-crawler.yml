@@ -1,7 +1,7 @@
 name: Pipeline 1 - Frontend Crawler
 on:
- schedule:
-   - cron: '30 18 * * *' # 12:00 AM IST
+# schedule:
+#  - cron: '30 18 * * *' # 12:00 AM IST
  workflow_dispatch:      # Manual test button
 jobs:
  crawl-portals:

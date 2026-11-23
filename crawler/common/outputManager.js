@@ -10,7 +10,13 @@ function slugify(text) {
         .slice(0, 80) || "untitled";
 }
 
-function createPageFolder(outputRoot, siteId, pageNumber, pageTitle) {
+function createPageFolder(
+    outputRoot,
+    siteId,
+    pageNumber,
+    pageTitle,
+    outputFolder
+) {
     const pageSlug = slugify(pageTitle);
 
     const folderName =
@@ -19,7 +25,7 @@ function createPageFolder(outputRoot, siteId, pageNumber, pageTitle) {
     const pageFolder = path.join(
         outputRoot,
         siteId,
-        "pages",
+        outputFolder,
         folderName
     );
 
@@ -50,19 +56,25 @@ function savePageOutput({
     outputRoot,
     siteId,
     pageNumber,
-    pageData
+    pageData,
+    folderName,
+    saveJson = true,
+    outputFolder = "pages"
 }) {
     const pageTitle =
-        pageData.pageInfo?.title || `page-${pageNumber}`;
+        folderName || pageData.pageInfo?.title || `page-${pageNumber}`;
 
     const pageFolder = createPageFolder(
         outputRoot,
         siteId,
         pageNumber,
-        pageTitle
+        pageTitle,
+        outputFolder
     );
 
-    const jsonPath = savePageJson(pageFolder, pageData);
+    const jsonPath = saveJson
+        ? savePageJson(pageFolder, pageData)
+        : null;
 
     return {
         pageFolder,

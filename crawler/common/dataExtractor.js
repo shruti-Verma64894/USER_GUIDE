@@ -1,6 +1,24 @@
 
-async function extractPageData(page) {
-    return await page.evaluate(() => {
+async function extractPageData(page, options = {}) {
+    return await page.evaluate((evaluationOptions) => {
+        const excludedSelectors = Array.isArray(evaluationOptions?.excludeSelectors)
+            ? evaluationOptions.excludeSelectors
+            : [];
+
+        function isExcluded(element) {
+            return excludedSelectors.some(selector => {
+                try {
+                    return element.matches(selector) || element.closest(selector);
+                } catch {
+                    return false;
+                }
+            });
+        }
+
+        function getVisibleElements(selector) {
+            return Array.from(document.querySelectorAll(selector))
+                .filter(element => !isExcluded(element));
+        }
 
         // Helper: Get clean text from an element.
         function getText(element) {
@@ -72,28 +90,23 @@ async function extractPageData(page) {
         };
 
         // 3. HEADINGS
-        const headings = Array.from(
-            document.querySelectorAll("h1, h2, h3, h4, h5, h6")
-        ).map(element => ({
+        const headings = getVisibleElements("h1, h2, h3, h4, h5, h6").map(element => ({
             tag: element.tagName.toLowerCase(),
             text: getText(element),
             ...getAttributes(element)
         })).filter(item => item.text);
 
         // 4. PARAGRAPHS
-        const paragraphs = Array.from(
-            document.querySelectorAll("p")
-        ).map(element => getText(element))
+        const paragraphs = getVisibleElements("p").map(element => getText(element))
             .filter(Boolean);
 
         // 5. NAVIGATION MENUS
-        const navigation = Array.from(
-            document.querySelectorAll("nav, [role='navigation']")
-        ).map(nav => ({
+        const navigation = getVisibleElements("nav, [role='navigation']").map(nav => ({
             ...getAttributes(nav),
             text: getText(nav),
 
             links: Array.from(nav.querySelectorAll("a"))
+                .filter(link => !isExcluded(link))
                 .map(link => ({
                     text: getText(link),
                     href: link.href,
@@ -102,10 +115,8 @@ async function extractPageData(page) {
         }));
 
         // 6. PAGE SECTIONS
-        const sections = Array.from(
-            document.querySelectorAll(
-                "main, section, article, [role='main']"
-            )
+        const sections = getVisibleElements(
+            "main, section, article, [role='main']"
         ).map(element => ({
             tag: element.tagName.toLowerCase(),
             text: getText(element),
@@ -113,9 +124,7 @@ async function extractPageData(page) {
         })).filter(section => section.text);
 
         // 7. ALL LINKS
-        const links = Array.from(
-            document.querySelectorAll("a[href]")
-        ).map(link => ({
+        const links = getVisibleElements("a[href]").map(link => ({
             text: getText(link),
             href: link.href,
             target: link.target || null,
@@ -124,33 +133,51 @@ async function extractPageData(page) {
         }));
 
         // 8. CLICKABLE ELEMENTS
-        const clickableElements = Array.from(
-            document.querySelectorAll(
-                "button, [role='button'], input[type='button'], " +
-                "input[type='submit'], [onclick]"
-            )
-        ).map(element => ({
-            tag: element.tagName.toLowerCase(),
-            text: getText(element) ||
+        const clickableElements = getVisibleElements(
+            "button, [role='button'], input[type='button'], " +
+            "input[type='submit'], [onclick]"
+        ).map(element => {
+            const text = getText(element) ||
                 element.getAttribute("aria-label") ||
-                element.getAttribute("title") || "",
+                element.getAttribute("title") || "";
+            const normalizedText = text.toLowerCase();
+            let purpose = null;
 
-            type: element.getAttribute("type"),
-            disabled: element.disabled === true,
-            ...getAttributes(element)
-        }));
+            if (normalizedText.includes("save")) {
+                purpose = "Save or submit action; the crawler records this control but does not activate it.";
+            } else if (normalizedText.includes("delete")) {
+                purpose = "Delete action; the crawler records this control but does not execute deletion.";
+            } else if (normalizedText.includes("deactivate")) {
+                purpose = "Deactivate action; the crawler records this control but does not execute deactivation.";
+            } else if (normalizedText.includes("edit")) {
+                purpose = "Edit action; the crawler records this control but does not open an edit workflow.";
+            } else if (normalizedText.includes("b2c")) {
+                purpose = "B2C navigation; the crawler records this option but does not interact with it.";
+            } else if (normalizedText.includes("logout") || normalizedText.includes("log out")) {
+                purpose = "Logout control; the crawler records it but never activates it.";
+            }
+
+            return {
+                tag: element.tagName.toLowerCase(),
+                text,
+                type: element.getAttribute("type"),
+                disabled: element.disabled === true,
+                href: element.href || null,
+                formAction: element.form?.action || null,
+                purpose,
+                ...getAttributes(element)
+            };
+        });
 
         // 9. FORMS
-        const forms = Array.from(
-            document.querySelectorAll("form")
-        ).map(form => ({
+        const forms = getVisibleElements("form").map(form => ({
             action: form.action || null,
             method: form.method || "get",
             ...getAttributes(form),
 
             fields: Array.from(
                 form.querySelectorAll("input, textarea, select")
-            ).map(field => ({
+            ).filter(field => !isExcluded(field)).map(field => ({
                 tag: field.tagName.toLowerCase(),
                 type: field.type || null,
                 name: field.name || null,
@@ -169,9 +196,7 @@ async function extractPageData(page) {
 
         // 10. INPUT FIELDS OUTSIDE OR INSIDE FORMS
         // Never collect field.value.
-        const inputs = Array.from(
-            document.querySelectorAll("input, textarea, select")
-        ).map(field => ({
+        const inputs = getVisibleElements("input, textarea, select").map(field => ({
             tag: field.tagName.toLowerCase(),
             type: field.type || null,
             name: field.name || null,
@@ -184,9 +209,7 @@ async function extractPageData(page) {
         }));
 
         // 11. IMAGES
-        const images = Array.from(
-            document.querySelectorAll("img")
-        ).map(image => ({
+        const images = getVisibleElements("img").map(image => ({
             src: image.src || null,
             alt: image.alt || null,
             title: image.title || null,
@@ -198,9 +221,7 @@ async function extractPageData(page) {
         // 12. TABLES
         // Collect table structure and visible cell text.
         // No row selection or record-link filtering.
-        const tables = Array.from(
-            document.querySelectorAll("table")
-        ).map((table, tableIndex) => ({
+        const tables = getVisibleElements("table").map((table, tableIndex) => ({
             index: tableIndex + 1,
             ...getAttributes(table),
 
@@ -219,12 +240,10 @@ async function extractPageData(page) {
 
         // 13. ACCESSIBILITY INFORMATION
         const accessibility = {
-            landmarks: Array.from(
-                document.querySelectorAll(
-                    "header, nav, main, footer, aside, " +
-                    "[role='banner'], [role='main'], " +
-                    "[role='contentinfo'], [role='complementary']"
-                )
+            landmarks: getVisibleElements(
+                "header, nav, main, footer, aside, " +
+                "[role='banner'], [role='main'], " +
+                "[role='contentinfo'], [role='complementary']"
             ).map(element => ({
                 tag: element.tagName.toLowerCase(),
                 role: element.getAttribute("role"),
@@ -232,15 +251,11 @@ async function extractPageData(page) {
                 text: getText(element).slice(0, 1000)
             })),
 
-            elementsWithoutAlt: Array.from(
-                document.querySelectorAll("img:not([alt])")
-            ).map(image => ({
+            elementsWithoutAlt: getVisibleElements("img:not([alt])").map(image => ({
                 src: image.src || null
             })),
 
-            buttonsWithoutAccessibleName: Array.from(
-                document.querySelectorAll("button")
-            ).filter(button =>
+            buttonsWithoutAccessibleName: getVisibleElements("button").filter(button =>
                 !getText(button) &&
                 !button.getAttribute("aria-label") &&
                 !button.getAttribute("title")
@@ -248,10 +263,8 @@ async function extractPageData(page) {
         };
 
         // 14. STRUCTURED DATA (JSON-LD)
-        const structuredData = Array.from(
-            document.querySelectorAll(
-                'script[type="application/ld+json"]'
-            )
+        const structuredData = getVisibleElements(
+            'script[type="application/ld+json"]'
         ).map(script => {
             try {
                 return JSON.parse(script.textContent);
@@ -263,7 +276,14 @@ async function extractPageData(page) {
         });
 
         // 15. PAGE TEXT
-        const pageText = getText(document.body);
+        const pageTextRoot = document.body.cloneNode(true);
+        for (const selector of excludedSelectors) {
+            try {
+                pageTextRoot.querySelectorAll(selector)
+                    .forEach(element => element.remove());
+            } catch {}
+        }
+        const pageText = getText(pageTextRoot);
 
         // Return all extracted information.
         return {
@@ -284,7 +304,7 @@ async function extractPageData(page) {
             structuredData,
             extractedAt: new Date().toISOString()
         };
-    });
+    }, options);
 }
 
 module.exports = {

@@ -16,6 +16,67 @@ const {
 } = require("./screenshot");
 const { savePageOutput } = require("./outputManager");
 
+const CLIENT_FILTER_PAGE_PATHS = new Set([
+    "/find-and-nurture",
+    "/procurement-notices",
+    "/sam.gov-leads",
+    "/recompetes"
+]);
+
+async function waitForClientFilterPageReady(page, site, pageUrl) {
+    if (site.id !== "client") {
+        return;
+    }
+
+    const pathname = new URL(pageUrl).pathname;
+
+    if (!CLIENT_FILTER_PAGE_PATHS.has(pathname)) {
+        return;
+    }
+
+    console.log("Waiting for Client filter data to finish loading...");
+
+    await page.waitForFunction(() => {
+        const filterContainer = document.querySelector(
+            ".main-section-area.find-nurture " +
+            ".tab-pane.active.show #filter-container"
+        );
+
+        if (!filterContainer) {
+            return false;
+        }
+
+        const rows = Array.from(
+            filterContainer.querySelectorAll(".filter-row")
+        );
+
+        if (rows.length === 0) {
+            return false;
+        }
+
+        const hasVisibleControl = row =>
+            Array.from(
+                row.querySelectorAll(
+                    "input, select, .select2-container"
+                )
+            ).some(control => {
+                const style = window.getComputedStyle(control);
+
+                return (
+                    style.display !== "none" &&
+                    style.visibility !== "hidden" &&
+                    control.getClientRects().length > 0
+                );
+            });
+
+        return rows.every(hasVisibleControl);
+    }, {
+        timeout: 45000
+    });
+
+    console.log("Client filter data loaded successfully.");
+}
+
 async function crawlWebsite({
     page,
     site,
@@ -161,11 +222,17 @@ async function crawlWebsite({
             }
 
             await waitForPageReady(page);
+            await waitForClientFilterPageReady(page, site, finalUrl);
 
             // Extract information from the current page.
             console.log("Extracting page information...");
 
-            const pageData = await extractPageData(page);
+            const pageData = await extractPageData(
+                page,
+                site.id === "admin"
+                    ? { excludeSelectors: ["#controlMenu"] }
+                    : {}
+            );
 
             // Save JSON and prepare the screenshot path.
             const nextPageNumber = pageCount + 1;
@@ -217,6 +284,46 @@ async function crawlWebsite({
             const links = pageData.links || [];
 
             for (const link of links) {
+                if (site.id === "admin") {
+                    const lowerHref = String(link.href || "").toLowerCase();
+                    const lowerText = String(link.text || "").toLowerCase();
+                    const urlPath = (() => {
+                        try {
+                            return new URL(link.href).pathname.toLowerCase();
+                        } catch {
+                            return "";
+                        }
+                    })();
+
+                    if (
+                        lowerText.includes("b2c") ||
+                        lowerHref.includes("logout") ||
+                        /(?:\/|=)(?:analytics|virtual-assistant-manager)(?:\/|$|\?|#)/i.test(lowerHref)
+                    ) {
+                        continue;
+                    }
+
+                    if ([
+                        "/data-dashboard",
+                        "/schedule",
+                        "/queue-manager",
+                        "/email-viewer",
+                        "/grid-management",
+                        "/marketing-accelerator",
+                        "/small-business-data",
+                        "/resource-center",
+                        "/blogs"
+                    ].includes(urlPath)) {
+                        continue;
+                    }
+
+                    if (
+                        urlPath.endsWith("/logout") ||
+                        lowerText.includes("logout")
+                    ) {
+                        continue;
+                    }
+                }
 
                 // Public-site login links must not enter the crawl queue.
                 if (site.id === "public" && isLoginLink(link)) {

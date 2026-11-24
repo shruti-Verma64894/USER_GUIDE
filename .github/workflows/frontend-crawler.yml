@@ -1,134 +1,266 @@
 name: Pipeline 1 - Frontend Crawler
+ 
 on:
-# schedule:
-#  - cron: '30 18 * * *' # 12:00 AM IST
- workflow_dispatch:      # Manual test button
+
+  # schedule:
+
+  #   - cron: '30 18 * * *' # 12:00 AM IST
+
+  workflow_dispatch:      # Manual test button
+ 
 jobs:
- crawl-portals:
-   runs-on: ubuntu-latest
-   timeout-minutes: 15
-   container:
-     image: mcr.microsoft.com/playwright:v1.65.1-noble
-     options: --cap-add=NET_ADMIN --device=/dev/net/tun
-   steps:
-     - name: Checkout Crawler Repo
-       uses: actions/checkout@v4
-     - name: Install jq (Fast)
-       run: |
-         curl -sL https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64 -o /usr/local/bin/jq
-         chmod +x /usr/local/bin/jq
-     - name: Install Dependencies
-       run: npm ci
-     - name: Connect to OpenVPN
-       env:
-         VPN_CONFIG_BASE64: ${{ secrets.VPN_CONFIG_BASE64 }}
-         VPN_USERNAME: ${{ secrets.VPN_USERNAME }}
-         VPN_PASSWORD: ${{ secrets.VPN_PASSWORD }}
-       run: |
-         apt-get update && apt-get install -y openvpn iproute2
-         echo "$VPN_CONFIG_BASE64" | base64 -d > /tmp/client.ovpn
-         # Remove Windows-only option to avoid warnings on Linux
-         sed -i '/block-outside-dns/d' /tmp/client.ovpn
-         # Save private key passphrase for --askpass
-         printf "%s\n" "$VPN_PASSWORD" > /tmp/keypass.txt
-         chmod 600 /tmp/keypass.txt
-         if grep -q "auth-user-pass" /tmp/client.ovpn && [ -n "$VPN_USERNAME" ]; then
-           printf "%s\n%s\n" "$VPN_USERNAME" "$VPN_PASSWORD" > /tmp/auth.txt
-           chmod 600 /tmp/auth.txt
-           openvpn --config /tmp/client.ovpn --askpass /tmp/keypass.txt --auth-user-pass /tmp/auth.txt --daemon --writepid /tmp/openvpn.pid --log /tmp/openvpn.log
-         else
-           openvpn --config /tmp/client.ovpn --askpass /tmp/keypass.txt --daemon --writepid /tmp/openvpn.pid --log /tmp/openvpn.log
-         fi
-         # Wait up to 30s for the VPN tunnel (tun0) to come up
-         for i in $(seq 1 15); do
-           if ip link show tun0 >/dev/null 2>&1; then
-             echo "OpenVPN connected successfully (tun0 is up)."
-             break
-           fi
-           sleep 2
-         done
-         if ! ip link show tun0 >/dev/null 2>&1; then
-           echo "OpenVPN failed to connect. Logs:"
-           cat /tmp/openvpn.log
-           exit 1
-         fi
-     - name: Run Playwright Crawler
-       env:
-         PUBLIC_URL: ${{ vars.PUBLIC_URL }}
-         ADMIN_URL: ${{ vars.ADMIN_URL }}
-         CLIENT_URL: ${{ vars.CLIENT_URL }}
-         ADMIN_USERNAME: ${{ secrets.ADMIN_USERNAME }}
-         ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-         CLIENT_USERNAME: ${{ secrets.CLIENT_USERNAME }}
-         CLIENT_PASSWORD: ${{ secrets.CLIENT_PASSWORD }}
-       run: xvfb-run --auto-servernum node crawler.js
-     - name: Disconnect OpenVPN
-       if: always()
-       run: |
-         if [ -f /tmp/openvpn.pid ]; then
-           kill -TERM "$(cat /tmp/openvpn.pid)" || true
-         fi
-         # Wait up to 10s for tun0 to close and default routes to restore
-         for i in $(seq 1 10); do
-           if ! ip link show tun0 >/dev/null 2>&1; then
-             echo "OpenVPN disconnected cleanly (tun0 removed)."
-             break
-           fi
-           sleep 1
-         done
-         rm -f /tmp/client.ovpn /tmp/auth.txt /tmp/keypass.txt /tmp/openvpn.log /tmp/openvpn.pid
-     - name: Normalize JSON, Compare SHA-256 & Push to Central Docs Repo
-       id: push_data
-       run: |
-         git clone https://x-access-token:${{ secrets.CENTRAL_REPO_PAT }}@github.com/harshh122/central-docs-hub.git central-docs
-         mkdir -p central-docs/frontend
-         # 1. Normalize JSON and compare SHA-256 before copying
-         find output -type f -name "*.json" | while read -r file; do
-           rel_path="${file#output/}"
-           dest="central-docs/frontend/$rel_path"
-           mkdir -p "$(dirname "$dest")"
-           jq -S -c . "$file" > /tmp/normalized.json
-           new_hash=$(sha256sum /tmp/normalized.json | awk '{print $1}')
-           old_hash=$([ -f "$dest" ] && sha256sum "$dest" | awk '{print $1}' || echo "")
-           if [ "$new_hash" = "$old_hash" ]; then
-             echo "Skipping unchanged JSON (SHA-256 match): $rel_path"
-           else
-             echo "Updating JSON (SHA-256 changed): $rel_path"
-             cp /tmp/normalized.json "$dest"
-           fi
-         done
-         rm -f /tmp/normalized.json
-         # 2. Compare PNG/image SHA-256 before copying
-         find output -type f \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.webp" \) | while read -r file; do
-           rel_path="${file#output/}"
-           dest="central-docs/frontend/$rel_path"
-           mkdir -p "$(dirname "$dest")"
-           new_hash=$(sha256sum "$file" | awk '{print $1}')
-           old_hash=$([ -f "$dest" ] && sha256sum "$dest" | awk '{print $1}' || echo "")
-           if [ "$new_hash" = "$old_hash" ]; then
-             echo "Skipping unchanged image (SHA-256 match): $rel_path"
-           else
-             echo "Updating image (SHA-256 changed): $rel_path"
-             cp "$file" "$dest"
-           fi
-         done
-         cd central-docs
-         git config user.name "github-actions[bot]"
-         git config user.email "github-actions[bot]@users.noreply.github.com"
-         git add frontend
-         if git diff --staged --quiet; then
-           echo "No changes for frontend."
-           echo "changed=false" >> $GITHUB_OUTPUT
-         else
-           git commit -m "chore: update frontend JSON and screenshots"
-           git push
-           echo "changed=true" >> $GITHUB_OUTPUT
-         fi
-     - name: Trigger Central Hub (Pipeline 3)
-       if: steps.push_data.outputs.changed == 'true'
-       uses: peter-evans/repository-dispatch@v3
-       with:
-         token: ${{ secrets.CENTRAL_REPO_PAT }}
-         repository: harshh122/central-docs-hub
-         event-type: json-data-updated
-         client-payload: '{"source": "frontend"}'
+
+  crawl-portals:
+
+    runs-on: ubuntu-latest
+
+    container:
+
+      image: mcr.microsoft.com/playwright:v1.65.1-noble
+
+      options: --cap-add=NET_ADMIN --device=/dev/net/tun
+
+    steps:
+
+      - name: Checkout Crawler Repo
+
+        uses: actions/checkout@v4
+ 
+      - name: Install jq (Fast)
+
+        run: |
+
+          curl -sL https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64 -o /usr/local/bin/jq
+
+          chmod +x /usr/local/bin/jq
+ 
+      - name: Install Dependencies
+
+        run: npm ci
+ 
+      - name: Connect to OpenVPN
+
+        env:
+
+          VPN_CONFIG_BASE64: ${{ secrets.VPN_CONFIG_BASE64 }}
+
+          VPN_USERNAME: ${{ secrets.VPN_USERNAME }}
+
+          VPN_PASSWORD: ${{ secrets.VPN_PASSWORD }}
+
+        run: |
+
+          apt-get update && apt-get install -y openvpn iproute2
+
+          echo "$VPN_CONFIG_BASE64" | base64 -d > /tmp/client.ovpn
+
+          # Remove Windows-only option to avoid warnings on Linux
+
+          sed -i '/block-outside-dns/d' /tmp/client.ovpn
+
+          # Save private key passphrase for --askpass
+
+          printf "%s\n" "$VPN_PASSWORD" > /tmp/keypass.txt
+
+          chmod 600 /tmp/keypass.txt
+ 
+          if grep -q "auth-user-pass" /tmp/client.ovpn && [ -n "$VPN_USERNAME" ]; then
+
+            printf "%s\n%s\n" "$VPN_USERNAME" "$VPN_PASSWORD" > /tmp/auth.txt
+
+            chmod 600 /tmp/auth.txt
+
+            openvpn --config /tmp/client.ovpn --askpass /tmp/keypass.txt --auth-user-pass /tmp/auth.txt --daemon --writepid /tmp/openvpn.pid --log /tmp/openvpn.log
+
+          else
+
+            openvpn --config /tmp/client.ovpn --askpass /tmp/keypass.txt --daemon --writepid /tmp/openvpn.pid --log /tmp/openvpn.log
+
+          fi
+ 
+          # Wait up to 30s for the VPN tunnel (tun0) to come up
+
+          for i in $(seq 1 15); do
+
+            if ip link show tun0 >/dev/null 2>&1; then
+
+              echo "OpenVPN connected successfully (tun0 is up)."
+
+              break
+
+            fi
+
+            sleep 2
+
+          done
+ 
+          if ! ip link show tun0 >/dev/null 2>&1; then
+
+            echo "OpenVPN failed to connect. Logs:"
+
+            cat /tmp/openvpn.log
+
+            exit 1
+
+          fi
+ 
+      - name: Run Playwright Crawler
+
+        env:
+
+          PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+
+          ADMIN_URL: ${{ vars.ADMIN_URL }}
+
+          CLIENT_URL: ${{ vars.CLIENT_URL }}
+
+          ADMIN_USERNAME: ${{ secrets.ADMIN_USERNAME }}
+
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+
+          CLIENT_USERNAME: ${{ secrets.CLIENT_USERNAME }}
+
+          CLIENT_PASSWORD: ${{ secrets.CLIENT_PASSWORD }}
+
+        run: xvfb-run --auto-servernum node crawler.js
+ 
+      - name: Disconnect OpenVPN
+
+        if: always()
+
+        run: |
+
+          if [ -f /tmp/openvpn.pid ]; then
+
+            kill -TERM "$(cat /tmp/openvpn.pid)" || true
+
+          fi
+
+          # Wait up to 10s for tun0 to close and default routes to restore
+
+          for i in $(seq 1 10); do
+
+            if ! ip link show tun0 >/dev/null 2>&1; then
+
+              echo "OpenVPN disconnected cleanly (tun0 removed)."
+
+              break
+
+            fi
+
+            sleep 1
+
+          done
+
+          rm -f /tmp/client.ovpn /tmp/auth.txt /tmp/keypass.txt /tmp/openvpn.log /tmp/openvpn.pid
+ 
+      - name: Normalize JSON, Compare SHA-256 & Push to Central Docs Repo
+
+        id: push_data
+
+        run: |
+
+          git clone https://x-access-token:${{ secrets.CENTRAL_REPO_PAT }}@github.com/harshh122/central-docs-hub.git central-docs
+
+          mkdir -p central-docs/frontend
+ 
+          # 1. Normalize JSON and compare SHA-256 before copying
+
+          find output -type f -name "*.json" | while read -r file; do
+
+            rel_path="${file#output/}"
+
+            dest="central-docs/frontend/$rel_path"
+
+            mkdir -p "$(dirname "$dest")"
+
+            jq -S -c . "$file" > /tmp/normalized.json
+
+            new_hash=$(sha256sum /tmp/normalized.json | awk '{print $1}')
+
+            old_hash=$([ -f "$dest" ] && sha256sum "$dest" | awk '{print $1}' || echo "")
+
+            if [ "$new_hash" = "$old_hash" ]; then
+
+              echo "Skipping unchanged JSON (SHA-256 match): $rel_path"
+
+            else
+
+              echo "Updating JSON (SHA-256 changed): $rel_path"
+
+              cp /tmp/normalized.json "$dest"
+
+            fi
+
+          done
+
+          rm -f /tmp/normalized.json
+ 
+          # 2. Compare PNG/image SHA-256 before copying
+
+          find output -type f \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.webp" \) | while read -r file; do
+
+            rel_path="${file#output/}"
+
+            dest="central-docs/frontend/$rel_path"
+
+            mkdir -p "$(dirname "$dest")"
+
+            new_hash=$(sha256sum "$file" | awk '{print $1}')
+
+            old_hash=$([ -f "$dest" ] && sha256sum "$dest" | awk '{print $1}' || echo "")
+
+            if [ "$new_hash" = "$old_hash" ]; then
+
+              echo "Skipping unchanged image (SHA-256 match): $rel_path"
+
+            else
+
+              echo "Updating image (SHA-256 changed): $rel_path"
+
+              cp "$file" "$dest"
+
+            fi
+
+          done
+ 
+          cd central-docs
+
+          git config user.name "github-actions[bot]"
+
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add frontend
+
+          if git diff --staged --quiet; then
+
+            echo "No changes for frontend."
+
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+
+          else
+
+            git commit -m "chore: update frontend JSON and screenshots"
+
+            git push
+
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+
+          fi
+ 
+      - name: Trigger Central Hub (Pipeline 3)
+
+        if: steps.push_data.outputs.changed == 'true'
+
+        uses: peter-evans/repository-dispatch@v3
+
+        with:
+
+          token: ${{ secrets.CENTRAL_REPO_PAT }}
+
+          repository: harshh122/central-docs-hub
+
+          event-type: json-data-updated
+
+          client-payload: '{"source": "frontend"}'
+ 

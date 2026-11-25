@@ -28,7 +28,7 @@ async function captureLoginPage(page, site, outputConfig) {
 
     // Save login page JSON
     if (outputConfig.saveIndividualJson) {
-        const jsonPath = path.join(loginFolder, "page.json");
+        const jsonPath = path.join(loginFolder, "login-page.json");
 
         fs.writeFileSync(
             jsonPath,

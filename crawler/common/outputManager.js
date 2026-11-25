@@ -35,7 +35,8 @@ function createPageFolder(
 }
 
 function savePageJson(pageFolder, pageData) {
-    const jsonPath = path.join(pageFolder, "page.json");
+    const folderName = path.basename(pageFolder);
+    const jsonPath = path.join(pageFolder, `${folderName}.json`);
 
     fs.writeFileSync(
         jsonPath,
@@ -62,7 +63,10 @@ function savePageOutput({
     outputFolder = "pages"
 }) {
     const pageTitle =
-        folderName || pageData.pageInfo?.title || `page-${pageNumber}`;
+        pageData.captureLabel ||
+        folderName ||
+        pageData.pageInfo?.title ||
+        `page-${pageNumber}`;
 
     const pageFolder = createPageFolder(
         outputRoot,

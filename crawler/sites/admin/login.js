@@ -3,16 +3,21 @@ const path = require("path");
 const { extractPageData } = require("../../common/dataExtractor");
 const { saveScreenshot, waitForPageReady } = require("../../common/screenshot");
 const { savePageOutput } = require("../../common/outputManager");
+const {
+    ADMIN_CHROME_SELECTORS,
+    closeAdminProductMenuIfOpen
+} = require("./adminChrome");
 
 let initialNavigationPageNumber = 1;
 
 async function saveAdminPage(page, site, outputConfig, label) {
+    await closeAdminProductMenuIfOpen(page);
     const outputRoot = path.resolve(
         process.cwd(),
         outputConfig.folder || "output"
     );
     const pageData = await extractPageData(page, {
-        excludeSelectors: ["#controlMenu"]
+        excludeSelectors: ADMIN_CHROME_SELECTORS
     });
     pageData.pageInfo.url = page.url();
     pageData.captureLabel = label;

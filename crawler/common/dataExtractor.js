@@ -1,5 +1,8 @@
 
+const { acceptCookieConsent } = require("./cookieConsent");
+
 async function extractPageData(page, options = {}) {
+    await acceptCookieConsent(page);
     return await page.evaluate((evaluationOptions) => {
         const excludedSelectors = Array.isArray(evaluationOptions?.excludeSelectors)
             ? evaluationOptions.excludeSelectors

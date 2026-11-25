@@ -1,6 +1,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { acceptCookieConsent } = require("./cookieConsent");
 
 function isTimeoutError(error) {
     return error && error.name === "TimeoutError";
@@ -12,6 +13,7 @@ async function waitForPageReady(page) {
     await page.waitForLoadState("load", {
         timeout: 30000
     });
+    await acceptCookieConsent(page);
 
     const currentUrl = page.url();
     const pathname = new URL(currentUrl).pathname;
@@ -132,6 +134,7 @@ async function saveScreenshot(page, destination) {
     await page.waitForLoadState("load", {
         timeout: 30000
     });
+    await acceptCookieConsent(page);
 
     // Capture screenshot.
     await page.screenshot({

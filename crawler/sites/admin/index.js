@@ -10,6 +10,19 @@ const path = require("path");
 const { extractPageData } = require("../../common/dataExtractor");
 const { waitForPageReady, saveScreenshot } = require("../../common/screenshot");
 const { savePageOutput } = require("../../common/outputManager");
+const { acceptCookieConsent } = require("../../common/cookieConsent");
+const {
+    ADMIN_CHROME_SELECTORS,
+    closeAdminProductMenuIfOpen
+} = require("./adminChrome");
+
+const ADMIN_REQUEST_PAGES = [
+    ["/affiliate-requests", "affiliate-requests"],
+    ["/demo-requests", "demo-requests"],
+    ["/collaboration-requests", "collaboration-requests"],
+    ["/contact-request", "contact-request"],
+    ["/user-feedback-requests", "user-feedback-requests"]
+];
 
 let adminOutputPageNumber = 1;
 
@@ -22,9 +35,10 @@ async function saveAdminState(
     folderName
 ) {
     await waitForPageReady(page);
+    await closeAdminProductMenuIfOpen(page);
     await page.waitForTimeout(crawlerConfig.waitTime || 0);
     const pageData = await extractPageData(page, {
-        excludeSelectors: ["#controlMenu"]
+        excludeSelectors: ADMIN_CHROME_SELECTORS
     });
     pageData.captureLabel = label;
     pageData.pageInfo.url = page.url();
@@ -75,6 +89,7 @@ async function crawlAdminUrl(page, site, crawlerConfig, outputConfig, url, label
 }
 
 async function clickIfPresent(page, locators) {
+    await acceptCookieConsent(page);
     for (const locator of locators) {
         const candidate = typeof locator === "string"
             ? page.locator(locator).first()
@@ -85,6 +100,354 @@ async function clickIfPresent(page, locators) {
         }
     }
     return null;
+}
+
+function getActionLocator(page, name) {
+    return page.getByRole("button", {
+        name: new RegExp(`^${name}$`, "i")
+    }).first();
+}
+
+async function clickAdminAction(page, name, timeout) {
+    await acceptCookieConsent(page);
+    const action = getActionLocator(page, name);
+    const textAction = page.locator("button, a, [role='button']")
+        .filter({ hasText: new RegExp(`^\\s*${name}\\s*$`, "i") })
+        .first();
+    let selectedAction = null;
+    for (const candidate of [action, textAction]) {
+        if (
+            await candidate.count() &&
+            await candidate.isVisible().catch(() => false)
+        ) {
+            selectedAction = candidate;
+            break;
+        }
+    }
+    if (!selectedAction) {
+        await textAction.waitFor({ state: "visible", timeout });
+        selectedAction = textAction;
+    }
+
+    await selectedAction.click();
+    await page.waitForLoadState("load", { timeout }).catch(error => {
+        if (error.name !== "TimeoutError") {
+            throw error;
+        }
+    });
+    await waitForPageReady(page);
+}
+
+async function crawlInvoiceWorkflow(page, site, crawlerConfig, outputConfig, base) {
+    const timeout = crawlerConfig.timeout;
+    await crawlAdminUrl(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        base + "/invoices-and-payment",
+        "invoices-and-payment"
+    );
+
+    await clickAdminAction(page, "Upload Invoice", timeout);
+    await page.waitForFunction(() => {
+        const modalIsVisible = Array.from(
+            document.querySelectorAll(".modal, [role='dialog']")
+        ).some(element => {
+            const style = window.getComputedStyle(element);
+            return (
+                style.display !== "none" &&
+                style.visibility !== "hidden" &&
+                element.getClientRects().length > 0
+            );
+        });
+        const recipientIsVisible = document.querySelector("#recipientName")
+            ?.getClientRects().length > 0;
+        return modalIsVisible || recipientIsVisible;
+    }, undefined, { timeout });
+    await saveAdminState(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        "invoices-upload-invoice"
+    );
+
+    const recipient = page.locator("#recipientName");
+    await recipient.waitFor({ state: "visible", timeout });
+    const recipientOptions = await recipient.locator("option").evaluateAll(options =>
+        options
+            .filter(option =>
+                option.value &&
+                !option.disabled &&
+                !/select|choose/i.test(option.textContent || "")
+            )
+            .map(option => option.value)
+    );
+    if (recipientOptions.length) {
+        await recipient.selectOption(recipientOptions[0]);
+    } else {
+        await recipient.click();
+        const options = page.locator(
+            "[role='option']:visible, .dropdown-menu:visible " +
+            "[role='menuitem']:visible, .dropdown-menu:visible .dropdown-item"
+        );
+        const optionCount = await options.count();
+        let selected = false;
+        for (let index = 0; index < optionCount; index++) {
+            const option = options.nth(index);
+            const text = (await option.innerText().catch(() => "")).trim();
+            if (!text || /select|choose/i.test(text)) {
+                continue;
+            }
+            await option.click();
+            selected = true;
+            break;
+        }
+        if (!selected) {
+            throw new Error("Invoices: No selectable recipients are available.");
+        }
+    }
+    await page.waitForLoadState("load", { timeout }).catch(error => {
+        if (error.name !== "TimeoutError") {
+            throw error;
+        }
+    });
+    await waitForPageReady(page);
+    await saveAdminState(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        "invoices-recipient-selected"
+    );
+
+    await clickAdminAction(page, "Continue", timeout);
+    await saveAdminState(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        "invoices-continue"
+    );
+
+    await clickAdminAction(page, "Publish Invoice", timeout);
+    await saveAdminState(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        "invoices-published"
+    );
+}
+
+async function crawlUnreadNotifications(page, site, crawlerConfig, outputConfig) {
+    const timeout = crawlerConfig.timeout;
+    const unreadTab = page.locator("a[href*='tab=unread']").first();
+    await unreadTab.waitFor({ state: "visible", timeout });
+
+    const unreadUrl = new URL(
+        await unreadTab.getAttribute("href"),
+        page.url()
+    ).href;
+    await Promise.all([
+        page.waitForURL(unreadUrl, { timeout }),
+        unreadTab.click()
+    ]);
+    await waitForPageReady(page);
+    await page.waitForTimeout(crawlerConfig.waitTime || 0);
+    await saveAdminState(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        "notifications-unread"
+    );
+}
+
+async function crawlUserProfileWorkflow(page, site, crawlerConfig, outputConfig, base) {
+    const timeout = crawlerConfig.timeout;
+    await crawlAdminUrl(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        base + "/users?view=profile",
+        "user-profile"
+    );
+
+    await clickAdminAction(page, "Edit Name", timeout);
+    const modal = page.locator(".modal:visible, [role='dialog']:visible").last();
+    await modal.waitFor({ state: "visible", timeout });
+    await waitForPageReady(page);
+    await saveAdminState(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        "user-profile-edit-name-modal"
+    );
+
+    const cancel = modal.getByRole("button", { name: /^Cancel$/i }).first();
+    await cancel.waitFor({ state: "visible", timeout });
+    await cancel.click();
+    await modal.waitFor({ state: "hidden", timeout });
+
+    await crawlAdminUrl(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        base + "/reset-password",
+        "change-password"
+    );
+}
+
+async function crawlDownloadsWorkflow(page, site, crawlerConfig, outputConfig, base) {
+    const timeout = crawlerConfig.timeout;
+    await crawlAdminUrl(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        base + "/downloads",
+        "downloads"
+    );
+
+    let clientSelected = false;
+    const nativeClientSelect = page.locator(
+        "select[id*='client' i]:visible, select[name*='client' i]:visible, " +
+        "select[aria-label*='client' i]:visible"
+    ).first();
+    if (await nativeClientSelect.count()) {
+        const clients = await nativeClientSelect.locator("option").evaluateAll(options =>
+            options
+                .filter(option =>
+                    option.value &&
+                    !option.disabled &&
+                    !/select|choose/i.test(option.textContent || "")
+                )
+                .map(option => option.value)
+        );
+        if (clients.length) {
+            await nativeClientSelect.selectOption(clients[0]);
+            clientSelected = true;
+        }
+    }
+
+    if (!clientSelected) {
+        const preferredClients = [
+            "Asponte Technology Inc",
+            "Inonde LLC",
+            "Nirvana Lab Inc"
+        ];
+        const clientInput = page.locator(
+            "input.client-combobox-input:visible, " +
+            "input[placeholder*='client' i]:visible"
+        ).first();
+        await clientInput.waitFor({ state: "visible", timeout });
+        await clientInput.click();
+        await page.waitForTimeout(300);
+
+        for (const name of preferredClients) {
+            const option = page.getByText(name, { exact: true }).last();
+            if (await option.isVisible().catch(() => false)) {
+                await option.click();
+                clientSelected = true;
+                break;
+            }
+        }
+
+        const options = page.locator(
+            "[role='option']:visible, [role='listbox']:visible > *, " +
+            ".select2-results__option:visible, " +
+            "[class*='client-combobox'] [class*='option']:visible, " +
+            "[class*='client-combobox'] [class*='item']:visible, " +
+            "[class*='client-option']:visible, " +
+            ".dropdown-menu:visible [role='menuitem']:visible, " +
+            ".dropdown-menu:visible .dropdown-item"
+        );
+        const optionCount = await options.count();
+        if (!clientSelected) {
+            for (let index = 0; index < optionCount; index++) {
+                const option = options.nth(index);
+                const text = (await option.innerText().catch(() => "")).trim();
+                const disabled = await option.getAttribute("aria-disabled");
+                if (!text || disabled === "true" || /select|choose/i.test(text)) {
+                    continue;
+                }
+                await option.click();
+                clientSelected = true;
+                break;
+            }
+        }
+
+        for (const name of preferredClients) {
+            if (clientSelected) {
+                break;
+            }
+            await clientInput.fill(name);
+            const option = page.getByText(name, { exact: true }).last();
+            let optionIsVisible = false;
+            try {
+                await option.waitFor({
+                    state: "visible",
+                    timeout: Math.min(timeout, 3000)
+                });
+                optionIsVisible = true;
+            } catch (error) {
+                if (error.name !== "TimeoutError") {
+                    throw error;
+                }
+            }
+            if (optionIsVisible) {
+                await option.click();
+                clientSelected = true;
+            }
+        }
+
+        if (!clientSelected) {
+            throw new Error(
+                "Downloads: The Client List did not expose a selectable client."
+            );
+        }
+    }
+    await page.waitForLoadState("load", { timeout }).catch(error => {
+        if (error.name !== "TimeoutError") {
+            throw error;
+        }
+    });
+    await page.waitForTimeout(crawlerConfig.waitTime || 500);
+    await waitForPageReady(page);
+    await saveAdminState(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        "downloads-client-selected"
+    );
+
+    const completedTab = page.getByRole("tab", {
+        name: /^Completed$/i
+    }).first();
+    if (await completedTab.count()) {
+        await completedTab.click();
+    } else {
+        const completedLink = page.getByText("Completed", { exact: true }).last();
+        if (!await completedLink.isVisible().catch(() => false)) {
+            throw new Error("Downloads: Could not find the Completed tab.");
+        }
+        await completedLink.click();
+    }
+    await page.waitForTimeout(crawlerConfig.waitTime || 500);
+    await waitForPageReady(page);
+    await saveAdminState(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        "downloads-completed"
+    );
 }
 
 async function clickNextAndWait(page, expectedHeading, timeout) {
@@ -175,9 +538,19 @@ async function clickPlusAndWait(page, timeout) {
     const plusButton = await clickIfPresent(page, [
         "button[aria-label*='add' i]",
         "button[title*='add' i]",
+        "a[aria-label*='add' i]",
+        "a[title*='add' i]",
+        "[role='button'][aria-label*='add' i]",
         "button:has-text('+')",
+        "a:has-text('+')",
+        "[role='button']:has-text('+')",
+        "button:has(.fa-plus)",
+        "a:has(.fa-plus)",
+        "[role='button']:has(.fa-plus)",
         "button .fa-plus",
-        "button[class*='plus' i]"
+        "button[class*='plus' i]",
+        "a[class*='plus' i]",
+        "[role='button'][class*='plus' i]"
     ]);
 
     if (!plusButton) {
@@ -449,8 +822,7 @@ async function crawlAdminWorkflows(page, site, crawlerConfig, outputConfig) {
     await waitForPageReady(page);
     await crawlVisibleModals(page, site, crawlerConfig, outputConfig, "customer-contract");
 
-    await crawlAdminUrl(page, site, crawlerConfig, outputConfig, base + "/invoices-and-payment", "invoices-and-payment");
-    await crawlVisibleModals(page, site, crawlerConfig, outputConfig, "invoices-and-payment");
+    await crawlInvoiceWorkflow(page, site, crawlerConfig, outputConfig, base);
 
     await openSafeDropdown(page, "Marketing Management");
     await saveAdminState(
@@ -480,23 +852,7 @@ async function crawlAdminWorkflows(page, site, crawlerConfig, outputConfig) {
         "administration-user-administration-dropdown",
         "User Administration"
     );
-
-    await crawlAdminUrl(
-        page,
-        site,
-        crawlerConfig,
-        outputConfig,
-        base + "/emails",
-        "administration-emails"
-    );
-
-    for (const [route, label] of [
-        ["/affiliate-requests", "affiliate-requests"],
-        ["/demo-requests", "demo-requests"],
-        ["/collaboration-requests", "collaboration-requests"],
-        ["/contact-request", "contact-request"],
-        ["/user-feedback-requests", "user-feedback-requests"]
-    ]) {
+    for (const [route, label] of ADMIN_REQUEST_PAGES) {
         await crawlAdminUrl(page, site, crawlerConfig, outputConfig, base + route, label);
         await clickPlusAndWait(page, crawlerConfig.timeout);
         await saveAdminState(
@@ -509,11 +865,51 @@ async function crawlAdminWorkflows(page, site, crawlerConfig, outputConfig) {
         await closeVisibleModal(page);
     }
 
-    await crawlAdminUrl(page, site, crawlerConfig, outputConfig, base + "/notifications", "notifications");
-    await crawlAdminUrl(page, site, crawlerConfig, outputConfig, base + "/users?view=profile", "user-profile");
-    await crawlAdminUrl(page, site, crawlerConfig, outputConfig, base + "/reset-password", "change-password");
-    await crawlAdminUrl(page, site, crawlerConfig, outputConfig, base + "/downloads", "downloads");
-    await crawlAdminUrl(page, site, crawlerConfig, outputConfig, base + "/contact-us", "user-feedback");
+    await crawlAdminUrl(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        base + "/emails",
+        "administration-emails"
+    );
+
+    await crawlAdminUrl(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        base + "/notifications",
+        "notifications"
+    );
+    await crawlUnreadNotifications(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig
+    );
+    await crawlUserProfileWorkflow(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        base
+    );
+    await crawlDownloadsWorkflow(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        base
+    );
+    await crawlAdminUrl(
+        page,
+        site,
+        crawlerConfig,
+        outputConfig,
+        base + "/contact-us",
+        "user-feedback"
+    );
 
     const pendingPopups = [];
     const popupHandler = popup => pendingPopups.push(popup);

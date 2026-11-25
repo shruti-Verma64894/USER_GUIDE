@@ -15,6 +15,10 @@ const {
     saveScreenshot
 } = require("./screenshot");
 const { savePageOutput } = require("./outputManager");
+const {
+    ADMIN_CHROME_SELECTORS,
+    closeAdminProductMenuIfOpen
+} = require("../sites/admin/adminChrome");
 
 const CLIENT_FILTER_PAGE_PATHS = new Set([
     "/find-and-nurture",
@@ -22,6 +26,253 @@ const CLIENT_FILTER_PAGE_PATHS = new Set([
     "/sam.gov-leads",
     "/recompetes"
 ]);
+
+const DATA_DETAIL_SIDEBARS = [
+    "aside",
+    "[role='complementary']",
+    "[class*='sidebar' i]",
+    "[id*='sidebar' i]",
+    "[aria-label*='sidebar' i]",
+    "[class*='side-nav' i]",
+    "[class*='sidenav' i]",
+    "nav[aria-orientation='vertical']",
+    "[role='tablist'][aria-orientation='vertical']"
+].join(", ");
+
+const DATA_DETAIL_SIDEBAR_CONTROLS = [
+    "button",
+    "[role='button']",
+    "[role='tab']",
+    "[role='menuitem']",
+    "a[href]",
+    "[onclick]",
+    "[data-toggle='tab']",
+    "[data-bs-toggle='tab']",
+    "input[type='button']",
+    "summary",
+    "[tabindex]:not([tabindex='-1'])"
+].join(", ");
+
+function isSupportedDataDetailSidebarPage(site, url) {
+    let parsedUrl;
+    try {
+        parsedUrl = new URL(url);
+    } catch {
+        return false;
+    }
+
+    const expectedHost = site.id === "public"
+        ? "www.nlproducts.net"
+        : site.id === "client"
+            ? "asponte-stg.nlproducts.net"
+            : null;
+
+    return (
+        expectedHost !== null &&
+        parsedUrl.hostname === expectedHost &&
+        getDataDetailEndpoint(parsedUrl.href) !== null
+    );
+}
+
+function getSidebarControlLabel(control, index) {
+    return (
+        control.text ||
+        control.ariaLabel ||
+        control.title ||
+        `sidebar-control-${index + 1}`
+    );
+}
+
+async function crawlDataDetailSidebarStates({
+    page,
+    site,
+    crawlerConfig,
+    outputConfig,
+    outputRoot,
+    pageUrl,
+    pageCount,
+    maxPages
+}) {
+    if (!isSupportedDataDetailSidebarPage(site, pageUrl)) {
+        return pageCount;
+    }
+
+    const sidebars = page.locator(DATA_DETAIL_SIDEBARS);
+    const sidebarCount = await sidebars.count();
+    const controlsToClick = [];
+    const seenControls = new Set();
+
+    for (let sidebarIndex = 0; sidebarIndex < sidebarCount; sidebarIndex++) {
+        const controls = sidebars.nth(sidebarIndex)
+            .locator(DATA_DETAIL_SIDEBAR_CONTROLS);
+        const controlCount = await controls.count();
+
+        for (let controlIndex = 0; controlIndex < controlCount; controlIndex++) {
+            const control = controls.nth(controlIndex);
+            if (!await control.isVisible()) {
+                continue;
+            }
+
+            const details = await control.evaluate((element, currentUrl) => {
+                const tagName = element.tagName.toLowerCase();
+                const text = (element.innerText || "").replace(/\s+/g, " ").trim();
+                const ariaLabel = element.getAttribute("aria-label") || "";
+                const title = element.getAttribute("title") || "";
+                const href = element.getAttribute("href");
+                const buttonType = element.getAttribute("type") || "";
+
+                if (
+                    (tagName === "button" && buttonType.toLowerCase() === "submit") ||
+                    element.closest("form") &&
+                        tagName === "input" &&
+                        element.type === "submit"
+                ) {
+                    return null;
+                }
+
+                if (tagName === "a" && href) {
+                    if (
+                        !href.startsWith("#") &&
+                        href !== "#" &&
+                        !/^javascript:/i.test(href)
+                    ) {
+                        let target;
+                        try {
+                            target = new URL(href, window.location.href);
+                        } catch {
+                            return null;
+                        }
+
+                        const current = new URL(currentUrl);
+                        if (
+                            target.origin !== current.origin ||
+                            target.pathname !== current.pathname ||
+                            target.search !== current.search
+                        ) {
+                            return null;
+                        }
+                    }
+                }
+
+                const className = typeof element.className === "string"
+                    ? element.className
+                    : "";
+                const parentClassName =
+                    typeof element.parentElement?.className === "string"
+                        ? element.parentElement.className
+                        : "";
+                const isActive =
+                    element.getAttribute("aria-selected") === "true" ||
+                    element.getAttribute("aria-current") === "page" ||
+                    element.getAttribute("aria-pressed") === "true" ||
+                    /\b(active|selected|current)\b/i.test(className) ||
+                    /\b(active|selected|current)\b/i.test(parentClassName);
+
+                return {
+                    tagName,
+                    text,
+                    ariaLabel,
+                    title,
+                    href,
+                    className,
+                    isActive
+                };
+            }, pageUrl);
+
+            if (!details || details.isActive) {
+                continue;
+            }
+
+            const key = [
+                details.tagName,
+                details.href || "",
+                details.ariaLabel,
+                details.title,
+                details.text,
+                details.className
+            ].join("|");
+            if (seenControls.has(key)) {
+                continue;
+            }
+            seenControls.add(key);
+            controlsToClick.push({
+                sidebarIndex,
+                controlIndex,
+                label: getSidebarControlLabel(details, controlsToClick.length)
+            });
+        }
+    }
+
+    for (const controlInfo of controlsToClick) {
+        if (maxPages > 0 && pageCount >= maxPages) {
+            break;
+        }
+
+        const control = sidebars
+            .nth(controlInfo.sidebarIndex)
+            .locator(DATA_DETAIL_SIDEBAR_CONTROLS)
+            .nth(controlInfo.controlIndex);
+        if (!await control.isVisible()) {
+            continue;
+        }
+
+        await control.click();
+
+        const currentUrl = new URL(page.url());
+        const originalUrl = new URL(pageUrl);
+        if (
+            currentUrl.origin !== originalUrl.origin ||
+            currentUrl.pathname !== originalUrl.pathname ||
+            currentUrl.search !== originalUrl.search
+        ) {
+            await page.goto(pageUrl, {
+                waitUntil: crawlerConfig.waitUntil,
+                timeout: crawlerConfig.timeout
+            });
+            await waitForPageReady(page);
+            continue;
+        }
+
+        if (currentUrl.hash !== originalUrl.hash) {
+            await page.evaluate(url => {
+                window.history.replaceState(
+                    window.history.state,
+                    "",
+                    url
+                );
+            }, pageUrl);
+        }
+
+        if (crawlerConfig.waitTime > 0) {
+            await page.waitForTimeout(crawlerConfig.waitTime);
+        }
+        await waitForPageReady(page);
+
+        const pageData = await extractPageData(page);
+        pageData.captureLabel = `data-sidebar-${controlInfo.label
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-|-$/g, "")}`;
+        pageData.pageInfo.url = pageUrl;
+
+        const outputPaths = savePageOutput({
+            outputRoot,
+            siteId: site.id,
+            pageNumber: pageCount + 1,
+            pageData
+        });
+        if (outputConfig.saveScreenshots) {
+            await saveScreenshot(page, outputPaths.screenshotPath);
+        }
+
+        pageCount++;
+        console.log(
+            `${site.name}: Sidebar state ${pageCount} saved successfully.`
+        );
+    }
+
+    return pageCount;
+}
 
 async function waitForClientFilterPageReady(page, site, pageUrl) {
     if (site.id !== "client") {
@@ -223,6 +474,9 @@ async function crawlWebsite({
 
             await waitForPageReady(page);
             await waitForClientFilterPageReady(page, site, finalUrl);
+            if (site.id === "admin") {
+                await closeAdminProductMenuIfOpen(page);
+            }
 
             // Extract information from the current page.
             console.log("Extracting page information...");
@@ -230,7 +484,7 @@ async function crawlWebsite({
             const pageData = await extractPageData(
                 page,
                 site.id === "admin"
-                    ? { excludeSelectors: ["#controlMenu"] }
+                    ? { excludeSelectors: ADMIN_CHROME_SELECTORS }
                     : {}
             );
 
@@ -279,6 +533,17 @@ async function crawlWebsite({
             console.log(
                 `${site.name}: Page ${pageCount} saved successfully.`
             );
+
+            pageCount = await crawlDataDetailSidebarStates({
+                page,
+                site,
+                crawlerConfig,
+                outputConfig,
+                outputRoot,
+                pageUrl: finalUrl,
+                pageCount,
+                maxPages
+            });
 
             // Find links for the next crawling cycle.
             const links = pageData.links || [];
